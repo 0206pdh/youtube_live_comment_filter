@@ -277,7 +277,7 @@ const STATE = {
   /* ---------------- 큐 처리 ---------------- */
   
   function gcProcessedIds() {
-    if (STATE.processedIds.size <= STATE.PROCESSED_LIMIT) return;
+    if (STATE.processedIds.size <= STATE.PROCESSED_LIMIT) return; //PROCESSED_LIMIT 초과 시 절반씩 버리기 , 기준 4000
     const next = new Set();
     let i = 0;
     for (const id of STATE.processedIds) {
@@ -287,7 +287,7 @@ const STATE = {
   }
   
   function dropOverflow() {
-    if (STATE.queue.length <= STATE.MAX_QUEUE) return;
+    if (STATE.queue.length <= STATE.MAX_QUEUE) return; //MAX_QUEUE 초과 시 오래된 항목 드롭, 기준 300
     const keep = STATE.queue.slice(-STATE.MAX_QUEUE);
     const keepIds = new Set(keep.map(it => it.id));
     STATE.queue = keep;
@@ -299,7 +299,7 @@ const STATE = {
     if (STATE.enabled === false) return;
     if (STATE.flushTimer) return;
     const now = Date.now();
-    let delay = Math.max(0, STATE.lastFlushAt + STATE.THROTTLE_MS - now);
+    let delay = Math.max(0, STATE.lastFlushAt + STATE.THROTTLE_MS - now); //THROTTLE_MS 간격 유지하여 flush 예약
     // 대량 갱신 모드면 추가 지연
     if (now < STATE.bulkModeUntilTs) delay = Math.max(delay, 400);
     STATE.flushTimer = setTimeout(() => {
@@ -315,6 +315,8 @@ const STATE = {
   
     // 큐 길이에 따라 배치 크기를 유동적으로 조정 (버스트 대응)
     const dynamicBatch = STATE.queue.length > 200 ? 100 : STATE.BATCH_SIZE;
+    //BATCH_SIZE는 기본 배치 크기, 200개 이상 대기 시 100개로 늘려 빠르게 처리 (버스트 대응)
+
     const batch = STATE.queue.splice(0, dynamicBatch);
     const texts = batch.map(b => b.text);
   
