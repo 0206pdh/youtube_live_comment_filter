@@ -48,4 +48,6 @@ server/dist/
 *.tfstate
 *.tfstate.*
 *.tfplan
+infra/environments/*/terraform.tfvars
+infra/environments/*/backend.hcl
 

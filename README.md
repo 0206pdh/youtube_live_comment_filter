@@ -236,6 +236,724 @@ Phase 1 실제 적용 전에 사용자가 준비해야 하는 값:
 - ACM certificate ARN
 - custom domain 이름
 
+각 값은 어디서 어떻게 준비하는가:
+
+1. AWS 기본 정보
+- `AWS Account ID`
+  - 위치: AWS Console 우측 상단 계정 메뉴 또는 `My Account`
+  - CLI: `aws sts get-caller-identity`
+  - 용도: IAM Role ARN, OIDC provider ARN, DynamoDB ARN, S3 ARN 구성
+- `배포 리전`
+  - 위치: AWS Console 우측 상단 region selector
+  - 예시: `ap-northeast-2`
+  - 기준: 사용자/운영 대상과 가까운 리전, 비용, 서비스 지원 여부
+- `Terraform state용 S3 bucket`
+  - 위치: AWS Console > S3 > 버킷 생성
+  - 권장 이름 예시: `youtube-live-comment-filter-tfstate`
+  - 권장 설정:
+    - Versioning 활성화
+    - Public access block 전체 활성화
+    - SSE-S3 또는 SSE-KMS 암호화 활성화
+  - 용도: Terraform 상태 파일 저장
+- `state lock용 DynamoDB table`
+  - 위치: AWS Console > DynamoDB > 테이블 생성
+  - 권장 이름 예시: `youtube-live-comment-filter-tf-lock`
+  - 파티션 키:
+    - `LockID` (String)
+  - 용도: Terraform 동시 실행 잠금 제어
+
+2. GitHub 연동 정보
+- `GitHub repository 이름 (owner/repo)`
+  - 위치: GitHub 저장소 메인 화면 URL
+  - 예시: `your-org/youtube_live_comment_filter`
+  - 용도: GitHub OIDC trust policy에서 어느 저장소가 role을 assume할 수 있는지 제한
+- `GitHub OIDC provider ARN`
+  - 위치: AWS Console > IAM > Identity providers
+  - 생성 방법:
+    - Provider URL: `https://token.actions.githubusercontent.com`
+    - Audience: `sts.amazonaws.com`
+  - 생성 후 ARN 예시:
+    - `arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com`
+  - 용도: GitHub Actions가 장기 액세스 키 없이 AWS role assume
+- `GitHub Actions가 assume할 Terraform role 이름`
+  - 위치: 이번 저장소의 Terraform 기준으로는 `infra/modules/github_oidc_roles`가 생성
+  - 예시 이름:
+    - `ylcf-prod-terraform-role`
+    - `ylcf-dev-terraform-role`
+  - 용도: `terraform plan/apply` 수행
+- `GitHub Actions가 assume할 deploy role 이름`
+  - 위치: 동일하게 `infra/modules/github_oidc_roles`가 생성
+  - 예시 이름:
+    - `ylcf-prod-deploy-role`
+    - `ylcf-dev-deploy-role`
+  - 용도: Docker image push, ECS service redeploy
+
+3. 애플리케이션 런타임 값
+- `실제 Chrome extension ID`
+  - 위치:
+    - Chrome 주소창에 `chrome://extensions`
+    - 확장 프로그램 카드에서 ID 확인
+  - 주의:
+    - 로컬 unpacked extension은 브라우저/환경에 따라 바뀔 수 있음
+    - Chrome Web Store 배포 후 고정 ID를 기준으로 운영하는 것이 좋음
+  - 용도:
+    - `ALLOWED_EXTENSION_IDS`
+    - API Gateway / 앱 CORS 정책
+- `실제 API_KEY`
+  - 준비 방법:
+    - 랜덤하고 충분히 긴 문자열 생성
+    - 예: 32~64자
+  - 생성 예시:
+    - PowerShell: `[guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")`
+  - 저장 위치:
+    - AWS Console > Systems Manager > Parameter Store
+    - 또는 Terraform의 `api_key_placeholder`를 실제 값으로 교체
+  - 사용 위치:
+    - ECS 컨테이너 환경의 `API_KEY`
+    - Chrome extension 옵션의 API Key 입력값
+- `허용할 origin 정책`
+  - 구성 대상:
+    - `ALLOWED_ORIGINS`
+    - `ALLOWED_EXTENSION_IDS`
+  - 웹 origin 예시:
+    - `http://localhost`
+    - `http://127.0.0.1`
+  - 확장 origin 예시:
+    - `chrome-extension://<extension_id>`
+  - 기준:
+    - 운영에서는 최소 허용 원칙으로 필요한 origin만 등록
+
+4. 운영용 선택 값
+- `Route53 hosted zone`
+  - 위치: AWS Console > Route53 > Hosted zones
+  - 준비 방법:
+    - 보유 도메인을 Route53에 등록하거나
+    - 외부 도메인을 Route53 hosted zone으로 연결
+  - 용도:
+    - API Gateway 또는 ALB 앞단에 사람이 읽는 도메인 연결
+- `ACM certificate ARN`
+  - 위치: AWS Console > Certificate Manager (ACM)
+  - 준비 방법:
+    - 대상 도메인에 대해 퍼블릭 인증서 요청
+    - DNS 검증 수행
+  - 예시:
+    - `api.example.com` 용 인증서
+  - 용도:
+    - HTTPS 종단
+    - custom domain 연결
+- `custom domain 이름`
+  - 예시:
+    - `api.example.com`
+    - `chat-filter.example.com`
+  - 준비 기준:
+    - Route53 hosted zone과 ACM 인증서가 준비되어 있어야 함
+  - 용도:
+    - 확장 프로그램에서 고정 API Gateway invoke URL 대신 사람이 관리하기 쉬운 도메인 사용
+
+실제 준비 순서 추천:
+
+1. AWS Account ID와 배포 리전을 먼저 확정
+2. Terraform state용 S3 bucket과 DynamoDB lock table 생성
+3. GitHub OIDC provider 생성
+4. dev 또는 prod용 Terraform / deploy role 생성
+5. Chrome extension ID 확정
+6. API_KEY 생성 및 SSM Parameter Store 저장
+7. 필요하면 Route53 hosted zone, ACM certificate, custom domain 준비
+
+준비 절차 상세:
+
+### 3.1 Terraform state용 S3 bucket 생성
+
+목적:
+
+- Terraform 상태 파일(`terraform.tfstate`)을 안전하게 중앙 저장
+- 여러 사람이 작업해도 동일한 상태 기준 사용
+- GitHub Actions와 로컬 Terraform이 같은 상태를 공유
+
+AWS Console 기준 절차:
+
+1. AWS Console 접속
+2. 상단 검색창에서 `S3` 검색
+3. `Buckets` 화면에서 `Create bucket` 클릭
+4. Bucket name 입력
+   - 예: `youtube-live-comment-filter-tfstate`
+   - 전역 고유 이름이어야 함
+5. Region 선택
+   - Terraform을 주로 적용할 리전과 동일하게 맞추는 것이 관리상 편함
+6. `Block Public Access settings for this bucket`
+   - 모든 항목 체크 유지
+   - 이유: Terraform state는 공개되면 안 됨
+7. `Bucket Versioning`
+   - `Enable` 선택
+   - 이유: state 손상/오류 시 이전 버전 복구 가능
+8. `Default encryption`
+   - 최소 `SSE-S3` 활성화
+   - 가능하면 운영에서는 `SSE-KMS`도 검토
+9. `Create bucket` 클릭
+
+생성 후 추가 확인:
+
+- `Properties` 탭에서 Versioning이 `Enabled`인지 확인
+- `Permissions` 탭에서 Public access block이 모두 `On`인지 확인
+- `Properties` 또는 `General purpose buckets` 목록에서 bucket 이름 확인
+
+나중에 어디에 넣는가:
+
+- `infra/environments/dev/backend.hcl`
+- `infra/environments/prod/backend.hcl`
+
+예시:
+
+```hcl
+bucket = "youtube-live-comment-filter-tfstate"
+```
+
+CLI 예시:
+
+```bash
+aws s3api create-bucket \
+  --bucket youtube-live-comment-filter-tfstate \
+  --region ap-northeast-2 \
+  --create-bucket-configuration LocationConstraint=ap-northeast-2
+
+aws s3api put-bucket-versioning \
+  --bucket youtube-live-comment-filter-tfstate \
+  --versioning-configuration Status=Enabled
+```
+
+주의:
+
+- state bucket은 정적 웹 호스팅 용도가 아니므로 퍼블릭 액세스를 절대 열지 않음
+- state 파일에는 인프라 구조와 민감 메타데이터가 포함될 수 있음
+
+### 3.2 Terraform lock용 DynamoDB table 생성
+
+목적:
+
+- Terraform 동시 실행 충돌 방지
+- GitHub Actions와 로컬 사용자가 동시에 apply할 때 lock 제어
+
+AWS Console 기준 절차:
+
+1. AWS Console에서 `DynamoDB` 검색
+2. `Tables` 화면에서 `Create table` 클릭
+3. Table name 입력
+   - 예: `youtube-live-comment-filter-tf-lock`
+4. Partition key 입력
+   - 이름: `LockID`
+   - 타입: `String`
+5. Capacity mode
+   - `On-demand` 권장
+   - 이유: 락 용도라 트래픽이 낮고 관리가 쉬움
+6. 나머지 옵션은 기본값으로 두고 `Create table`
+
+생성 후 확인:
+
+- 테이블 이름
+- 리전
+- ARN
+
+나중에 어디에 넣는가:
+
+- `infra/environments/dev/backend.hcl`
+- `infra/environments/prod/backend.hcl`
+
+예시:
+
+```hcl
+dynamodb_table = "youtube-live-comment-filter-tf-lock"
+```
+
+CLI 예시:
+
+```bash
+aws dynamodb create-table \
+  --table-name youtube-live-comment-filter-tf-lock \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --region ap-northeast-2
+```
+
+### 3.3 GitHub OIDC provider 생성
+
+목적:
+
+- GitHub Actions가 AWS 장기 액세스 키 없이 IAM Role을 Assume
+- 보안상 GitHub Secrets에 AWS Access Key를 저장하지 않음
+
+AWS Console 기준 절차:
+
+1. AWS Console에서 `IAM` 검색
+2. 왼쪽 메뉴 `Identity providers`
+3. `Add provider` 클릭
+4. Provider type
+   - `OpenID Connect`
+5. Provider URL
+   - `https://token.actions.githubusercontent.com`
+6. Audience
+   - `sts.amazonaws.com`
+7. `Add provider` 클릭
+
+생성 후 필요한 값:
+
+- Provider ARN
+  - 예: `arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com`
+
+나중에 어디에 넣는가:
+
+- `infra/environments/prod/terraform.tfvars`
+- 필요 시 dev 환경에도 동일하게 사용
+
+### 3.4 GitHub repository 정보 확인
+
+목적:
+
+- OIDC trust policy에서 어떤 저장소가 role을 assume할 수 있는지 제한
+
+확인 방법:
+
+1. GitHub 저장소 메인으로 이동
+2. URL 확인
+   - 예: `https://github.com/your-org/youtube_live_comment_filter`
+3. 필요한 값 추출
+   - `your-org/youtube_live_comment_filter`
+
+나중에 어디에 넣는가:
+
+- `github_repository` 변수
+
+### 3.5 API_KEY 생성 및 저장
+
+목적:
+
+- 확장 프로그램과 서버 사이의 1차 공유 인증값
+- extension ID 대신 실제 보호 기준으로 사용
+
+생성 기준:
+
+- 최소 32자 이상
+- 예측 가능한 문자열 금지
+- 운영/개발 키는 분리
+
+PowerShell 생성 예시:
+
+```powershell
+[guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
+```
+
+OpenSSL 예시:
+
+```bash
+openssl rand -hex 32
+```
+
+저장 방법 1: Terraform 변수 파일에 임시 저장
+
+- `infra/environments/dev/terraform.tfvars`
+- `infra/environments/prod/terraform.tfvars`
+
+예시:
+
+```hcl
+api_key_placeholder = "여기에_실제_랜덤_API_KEY"
+```
+
+저장 방법 2: AWS Parameter Store에서 직접 수정
+
+1. AWS Console에서 `Systems Manager` 검색
+2. `Parameter Store` 이동
+3. Terraform으로 생성된 파라미터 찾기
+   - 예: `/<project_name>/api/API_KEY`
+4. `Edit` 클릭 후 실제 값 입력
+
+확장 프로그램 쪽 사용:
+
+- `chrome://extensions`에서 확장 프로그램 열기
+- 옵션 페이지에서 API Key 입력
+- 서버와 동일한 값이어야 함
+
+주의:
+
+- 공개 저장소에 실제 API Key를 커밋하지 않음
+- dev용과 prod용은 반드시 분리
+
+### 3.6 Chrome extension ID 확인
+
+목적:
+
+- 필요 시 `ALLOWED_EXTENSION_IDS` 또는 origin 정책 구성
+
+확인 방법:
+
+1. Chrome 주소창에 `chrome://extensions`
+2. 우측 상단 `개발자 모드` 활성화
+3. 해당 확장 프로그램 카드에서 `ID` 확인
+
+주의:
+
+- 현재처럼 unpacked extension 로드 방식이면 사람마다 다를 수 있음
+- 따라서 운영의 절대 인증 기준으로 쓰지 않음
+- 현재 구조에서는 보조적인 CORS/운영 참고값으로만 사용
+
+### 3.7 허용 Origin 정책 정리
+
+목적:
+
+- CORS를 최소 허용 원칙으로 제한
+
+현재 구조에서 고려할 origin:
+
+1. 로컬 테스트용 웹 origin
+- `http://localhost`
+- `http://127.0.0.1`
+
+2. Chrome extension origin
+- `chrome-extension://<extension_id>`
+- 단, unpacked extension 배포 방식에서는 고정 관리가 어려움
+
+권장 운영 원칙:
+
+- 서버 보호의 주 기준은 `API_KEY`, WAF, rate limit
+- origin은 보조 정책
+- 운영 중 확장 ID가 고정되지 않는다면 `ALLOWED_EXTENSION_IDS`를 필수값으로 강제하지 않음
+
+### 3.8 Route53 hosted zone 준비
+
+필요한 경우:
+
+- 사람이 읽기 쉬운 도메인을 API Gateway 또는 ALB에 연결하고 싶을 때
+
+AWS Console 기준 절차:
+
+1. `Route53` 검색
+2. `Hosted zones` 이동
+3. `Create hosted zone`
+4. Domain name 입력
+   - 예: `example.com`
+5. Type
+   - `Public hosted zone`
+6. 생성 후 NS 레코드 확인
+7. 외부 도메인을 쓰는 경우 도메인 등록업체에 NS 위임 설정
+
+필요한 값:
+
+- Hosted zone name
+- Hosted zone ID
+
+### 3.9 ACM certificate 준비
+
+필요한 경우:
+
+- custom domain에 HTTPS 적용
+
+AWS Console 기준 절차:
+
+1. `Certificate Manager` 또는 `ACM` 검색
+2. `Request certificate`
+3. `Request a public certificate`
+4. 도메인 입력
+   - 예: `api.example.com`
+5. 검증 방식
+   - `DNS validation` 권장
+6. Route53 사용 중이면 자동 검증 레코드 생성 가능
+7. 발급 완료 후 ARN 확인
+
+필요한 값:
+
+- Certificate ARN
+
+주의:
+
+- API Gateway custom domain과 연결하려면 인증서 리전 조건도 확인해야 함
+- 현재 프로젝트는 아직 custom domain 연결 코드는 넣지 않았으므로 준비 정보만 확보
+
+### 3.10 Custom domain 이름 정하기
+
+예시:
+
+- `api.example.com`
+- `chat-filter.example.com`
+
+기준:
+
+- API 용도임이 명확한 이름 사용
+- 이후 Route53과 ACM에서 동일한 이름으로 연결
+
+### 3.11 Terraform 변수 파일 실제 작성
+
+dev 예시:
+
+1. `infra/environments/dev/terraform.tfvars.example` 복사
+2. 파일명을 `terraform.tfvars`로 저장
+3. 값 입력
+
+예시:
+
+```hcl
+aws_region            = "ap-northeast-2"
+project_name          = "ylcf-dev"
+github_repository     = "your-org/youtube_live_comment_filter"
+allowed_extension_ids = []
+api_key_placeholder   = "여기에_랜덤_API_KEY"
+```
+
+prod 예시:
+
+1. `infra/environments/prod/terraform.tfvars.example` 복사
+2. 파일명을 `terraform.tfvars`로 저장
+3. 값 입력
+
+예시:
+
+```hcl
+aws_region                 = "ap-northeast-2"
+project_name               = "ylcf-prod"
+github_repository          = "your-org/youtube_live_comment_filter"
+allowed_extension_ids      = []
+api_key_placeholder        = "여기에_랜덤_API_KEY"
+oidc_provider_arn          = "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+terraform_state_bucket_arn = "arn:aws:s3:::youtube-live-comment-filter-tfstate"
+terraform_lock_table_arn   = "arn:aws:dynamodb:ap-northeast-2:<ACCOUNT_ID>:table/youtube-live-comment-filter-tf-lock"
+```
+
+### 3.12 Terraform backend 파일 실제 작성
+
+dev 예시:
+
+1. `infra/environments/dev/backend.hcl.example` 복사
+2. 파일명을 `backend.hcl`로 저장
+3. 값 입력
+
+```hcl
+bucket         = "youtube-live-comment-filter-tfstate"
+key            = "youtube-live-comment-filter/dev/terraform.tfstate"
+region         = "ap-northeast-2"
+encrypt        = true
+dynamodb_table = "youtube-live-comment-filter-tf-lock"
+```
+
+prod 예시:
+
+```hcl
+bucket         = "youtube-live-comment-filter-tfstate"
+key            = "youtube-live-comment-filter/prod/terraform.tfstate"
+region         = "ap-northeast-2"
+encrypt        = true
+dynamodb_table = "youtube-live-comment-filter-tf-lock"
+```
+
+### 3.13 실제 apply 전 점검 체크리스트
+
+1. S3 state bucket 생성 완료
+2. DynamoDB lock table 생성 완료
+3. GitHub OIDC provider 생성 완료
+4. dev/prod `terraform.tfvars` 작성 완료
+5. dev/prod `backend.hcl` 작성 완료
+6. 실제 `API_KEY` 생성 완료
+7. 확장 프로그램 옵션에 동일한 API Key 입력 준비 완료
+8. AWS 인증(`aws configure` 또는 SSO) 준비 완료
+9. GitHub Actions role ARN placeholder를 실제 값으로 교체할 계획 수립
+
+### 3.14 지금 3.6까지 준비했다면 Phase 1을 마무리하는 순서
+
+전제:
+
+- `3.1 ~ 3.6`까지 준비 완료
+- 즉 최소한 아래는 확보된 상태
+  - AWS Account ID
+  - AWS region
+  - Terraform state용 S3 bucket
+  - Terraform lock용 DynamoDB table
+  - GitHub repository 이름
+  - GitHub OIDC provider ARN
+  - 실제 API_KEY
+
+이제 해야 할 일은 "준비한 값을 실제 파일과 GitHub 설정에 넣고 apply"하는 것이다.
+
+1. dev용 `terraform.tfvars` 작성
+
+파일:
+
+- `infra/environments/dev/terraform.tfvars`
+
+어떻게 만들까:
+
+- `infra/environments/dev/terraform.tfvars.example`를 복사
+- 파일명을 `terraform.tfvars`로 변경
+
+여기에 넣을 값:
+
+- `aws_region`
+  - 넣는 값 예: `ap-northeast-2`
+- `project_name`
+  - 권장 값 예: `ylcf-dev`
+- `github_repository`
+  - 예: `your-org/youtube_live_comment_filter`
+- `allowed_extension_ids`
+  - 현재 unpacked extension 운영이면 일단 빈 배열 `[]`로 두는 것을 권장
+- `api_key_placeholder`
+  - 네가 준비한 실제 API_KEY
+
+예시:
+
+```hcl
+aws_region            = "ap-northeast-2"
+project_name          = "ylcf-dev"
+github_repository     = "your-org/youtube_live_comment_filter"
+allowed_extension_ids = []
+api_key_placeholder   = "여기에_실제_DEV_API_KEY"
+```
+
+2. dev용 `backend.hcl` 작성
+
+파일:
+
+- `infra/environments/dev/backend.hcl`
+
+어떻게 만들까:
+
+- `infra/environments/dev/backend.hcl.example`를 복사
+- 파일명을 `backend.hcl`로 변경
+
+여기에 넣을 값:
+
+- `bucket`
+  - 네가 만든 Terraform state bucket 이름
+- `key`
+  - state 파일 경로. dev/prod를 분리
+- `region`
+  - 실제 AWS region
+- `dynamodb_table`
+  - 네가 만든 lock table 이름
+
+예시:
+
+```hcl
+bucket         = "youtube-live-comment-filter-tfstate"
+key            = "youtube-live-comment-filter/dev/terraform.tfstate"
+region         = "ap-northeast-2"
+encrypt        = true
+dynamodb_table = "youtube-live-comment-filter-tf-lock"
+```
+
+3. prod용 값도 미리 작성할지 결정
+
+바로 prod까지 갈 계획이면 아래 파일도 같이 작성:
+
+- `infra/environments/prod/terraform.tfvars`
+- `infra/environments/prod/backend.hcl`
+
+현재 단계에서 dev 먼저 검증하는 것이 더 안전하다.
+
+4. GitHub Actions Variables 입력
+
+위치:
+
+- GitHub Repository > `Settings` > `Secrets and variables` > `Actions` > `Variables`
+
+넣어야 할 값:
+
+- `AWS_REGION`
+- `DEV_TERRAFORM_ROLE_ARN`
+- `DEV_DEPLOY_ROLE_ARN`
+- `DEV_ECR_REPOSITORY`
+- `DEV_ECS_CLUSTER`
+- `DEV_ECS_SERVICE`
+- `PROD_TERRAFORM_ROLE_ARN`
+- `PROD_DEPLOY_ROLE_ARN`
+- `PROD_ECR_REPOSITORY`
+- `PROD_ECS_CLUSTER`
+- `PROD_ECS_SERVICE`
+
+설명:
+
+- 이번 저장소의 `.github/workflows/*.yml`은 이제 하드코딩 placeholder 대신 GitHub Variables를 읽도록 바뀌어 있다.
+- 즉 위 값들을 GitHub UI에 넣어야 워크플로가 실제로 동작한다.
+
+5. 로컬에서 dev Terraform 적용
+
+현재 셸이 AWS에 연결돼 있다면 아래 순서로 진행:
+
+```bash
+terraform -chdir=infra/environments/dev init -backend-config=backend.hcl
+terraform -chdir=infra/environments/dev plan
+terraform -chdir=infra/environments/dev apply
+```
+
+여기서 기대 결과:
+
+- VPC
+- public/private subnet
+- NAT gateway
+- ECR repository
+- CloudWatch log group
+- SSM parameter
+- ECS cluster/service
+- ALB
+- API Gateway
+- WAF
+
+6. apply 결과값 확인
+
+특히 확인해야 할 출력:
+
+- `api_gateway_endpoint`
+- `alb_dns_name`
+- `ecr_repository_url`
+
+이 중에서 실제 클라이언트가 바라볼 값은:
+
+- `api_gateway_endpoint`
+
+7. 확장 프로그램 설정 변경
+
+위치:
+
+- Chrome > `chrome://extensions`
+- 확장 프로그램 옵션 열기
+
+넣어야 할 값:
+
+- `serverUrl`
+  - Terraform apply 결과의 `api_gateway_endpoint`
+- `API Key`
+  - dev에서 사용한 `api_key_placeholder`와 같은 값
+
+8. 서버 헬스체크 확인
+
+확인 대상:
+
+- `<api_gateway_endpoint>/health`
+- `<api_gateway_endpoint>/health/live`
+- `<api_gateway_endpoint>/health/ready`
+
+정상이라면:
+
+- API Gateway -> ALB -> ECS(Fargate) -> FastAPI 경로가 연결된 것
+
+9. GitHub Actions로 dev 자동화 검증
+
+확인 방법:
+
+- `main` 브랜치에 infra/server 변경 반영
+- GitHub Actions에서 `terraform-infra`와 `deploy-app` 워크플로 동작 확인
+
+10. 그다음 prod로 확장
+
+dev가 안정적이면:
+
+- `infra/environments/prod/terraform.tfvars`
+- `infra/environments/prod/backend.hcl`
+- prod용 GitHub Variables
+
+를 채우고, prod apply를 수동 승인 기반으로 수행
+
+중요:
+
+- `terraform.tfvars`, `backend.hcl`은 민감 정보가 포함될 수 있으므로 git에 커밋하지 않는다.
+- 현재 `.gitignore`에 해당 파일들이 제외되도록 추가되어 있다.
+
 Phase 1 적용 순서:
 
 1. `infra/environments/dev/terraform.tfvars.example`를 복사해 실제 값 채우기

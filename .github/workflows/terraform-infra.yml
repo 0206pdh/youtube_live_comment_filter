@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ap-northeast-2
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-2' }}
   TF_VERSION: "1.8.5"
 
 jobs:
@@ -46,7 +46,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-terraform-role
+          role-to-assume: ${{ vars.DEV_TERRAFORM_ROLE_ARN }}
 
       - name: Terraform fmt
         run: terraform -chdir=infra/environments/dev fmt -check -recursive
@@ -77,7 +77,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-terraform-role
+          role-to-assume: ${{ vars.DEV_TERRAFORM_ROLE_ARN }}
 
       # Once backend.hcl is populated, switch this init command to:
       # terraform -chdir=infra/environments/dev init -backend-config=backend.hcl
@@ -104,7 +104,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-prod-terraform-role
+          role-to-assume: ${{ vars.PROD_TERRAFORM_ROLE_ARN }}
 
       # Once backend.hcl is populated, switch this init command to:
       # terraform -chdir=infra/environments/prod init -backend-config=backend.hcl

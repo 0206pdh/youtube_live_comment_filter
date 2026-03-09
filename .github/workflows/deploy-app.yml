@@ -22,16 +22,17 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: ap-northeast-2
-  ECR_REPOSITORY: ylcf-dev-api
-  ECS_CLUSTER: ylcf-dev-cluster
-  ECS_SERVICE: ylcf-dev-service
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-2' }}
 
 jobs:
   deploy-dev:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: dev
+    env:
+      ECR_REPOSITORY: ${{ vars.DEV_ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.DEV_ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.DEV_ECS_SERVICE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,7 +41,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-deploy-role
+          role-to-assume: ${{ vars.DEV_DEPLOY_ROLE_ARN }}
 
       - name: Login to ECR
         id: ecr
@@ -75,9 +76,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod
     env:
-      ECR_REPOSITORY: ylcf-prod-api
-      ECS_CLUSTER: ylcf-prod-cluster
-      ECS_SERVICE: ylcf-prod-service
+      ECR_REPOSITORY: ${{ vars.PROD_ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.PROD_ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.PROD_ECS_SERVICE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,7 +87,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ env.AWS_REGION }}
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-prod-deploy-role
+          role-to-assume: ${{ vars.PROD_DEPLOY_ROLE_ARN }}
 
       - name: Login to ECR
         id: ecr
