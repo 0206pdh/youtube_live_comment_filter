@@ -1,0 +1,115 @@
+name: terraform-infra
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform-infra.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform-infra.yml"
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Environment to apply"
+        required: true
+        default: "prod"
+        type: choice
+        options:
+          - dev
+          - prod
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+  TF_VERSION: "1.8.5"
+
+jobs:
+  plan-dev:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-terraform-role
+
+      - name: Terraform fmt
+        run: terraform -chdir=infra/environments/dev fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform -chdir=infra/environments/dev init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/environments/dev validate
+
+      - name: Terraform plan
+        run: terraform -chdir=infra/environments/dev plan
+
+  apply-dev:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-terraform-role
+
+      # Once backend.hcl is populated, switch this init command to:
+      # terraform -chdir=infra/environments/dev init -backend-config=backend.hcl
+      - name: Terraform init
+        run: terraform -chdir=infra/environments/dev init -backend=false
+
+      - name: Terraform apply
+        run: terraform -chdir=infra/environments/dev apply -auto-approve
+
+  apply-prod:
+    if: github.event_name == 'workflow_dispatch' && inputs.target_environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/github-actions-prod-terraform-role
+
+      # Once backend.hcl is populated, switch this init command to:
+      # terraform -chdir=infra/environments/prod init -backend-config=backend.hcl
+      - name: Terraform init
+        run: terraform -chdir=infra/environments/prod init -backend=false
+
+      - name: Terraform apply
+        run: terraform -chdir=infra/environments/prod apply -auto-approve

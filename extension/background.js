@@ -3,10 +3,12 @@
 // 새 기본 설정: rules, masks 추가
 const DEFAULT_SETTINGS = {
   serverUrl: 'http://127.0.0.1:8000',
+  apiKey: '',
   useExternalServer: false,    // true=외부서버(localhost:3000), false=로컬서버
   minSeverityToHide: 2,       // 2=악성 차단, 1=약간 악성 이상 차단
   action: 'hide',             // hide | blur | delete
   showBadge: true,
+  trainingMode: false,        // true일 때만 임시 캐시 라벨도 저장
   rules: [],                  // [{ term: '시발', min: 2 }, { term: '이재명', min: 1 }]
   masks: []                   // ['시발', '욕설A', ...]
 };
@@ -19,6 +21,14 @@ async function getSettings() {
 
 // 공백/구두점 경계까지 엄격할 필요가 있다면 정규식 개선 가능
 function normalize(s){ return (s || '').toString(); }
+
+function buildJsonHeaders(apiKey) {
+  // API Key는 로컬 개발에서는 비어 있을 수 있다.
+  // 값이 있을 때만 헤더에 실어 Phase 0 보안 옵션과 호환한다.
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['X-API-Key'] = apiKey;
+  return headers;
+}
 
 // --- 마스크 전처리: 모델 입력 전 불필요 단어 제거 ---
 function applyMaskToText(text, masks) {
@@ -52,7 +62,7 @@ function applyRuleFloorToLabel(originalText, modelLabel, rules) {
 }
 
 async function classify(texts) {
-  const { serverUrl, useExternalServer } = await getSettings();
+  const { serverUrl, apiKey, useExternalServer } = await getSettings();
   
   if (useExternalServer) {
     // 외부 서버: 각 텍스트를 개별적으로 요청하고 결과를 배열로 변환
@@ -66,7 +76,7 @@ async function classify(texts) {
       const promises = texts.map(text => 
         fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildJsonHeaders(apiKey),
           body: JSON.stringify({ texts: [text] })
         }).then(res => res.ok ? res.json() : null)
       );
@@ -113,7 +123,7 @@ async function classify(texts) {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildJsonHeaders(apiKey),
         body: JSON.stringify({ texts })
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -126,7 +136,7 @@ async function classify(texts) {
 }
 
 async function sendTrainingData(text, label, userId = 'anonymous', useTemp = false) {
-  const { serverUrl, useExternalServer } = await getSettings();
+  const { serverUrl, apiKey, useExternalServer } = await getSettings();
   // 외부 서버 사용 시 학습 데이터 전송 안 함
   if (useExternalServer) {
     console.log('External server mode: training data not sent');
@@ -136,7 +146,7 @@ async function sendTrainingData(text, label, userId = 'anonymous', useTemp = fal
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildJsonHeaders(apiKey),
       body: JSON.stringify({ text, label, user_id: userId })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -148,7 +158,7 @@ async function sendTrainingData(text, label, userId = 'anonymous', useTemp = fal
 }
 
 async function lookupCachedLabels(texts) {
-  const { serverUrl, useExternalServer } = await getSettings();
+  const { serverUrl, apiKey, useExternalServer } = await getSettings();
   // 외부 서버 사용 시 캐시 조회 안 함
   if (useExternalServer) {
     return { labels: [] };
@@ -157,7 +167,7 @@ async function lookupCachedLabels(texts) {
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildJsonHeaders(apiKey),
       body: JSON.stringify({ texts })
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -173,6 +183,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const settings = await getSettings();
       const rules = Array.isArray(settings.rules) ? settings.rules : [];
       const masks = Array.isArray(settings.masks) ? settings.masks : [];
+      const trainingMode = !!settings.trainingMode;
 
       const originalTexts = message.texts || [];
       // 1) 모델 입력용 마스크 전처리
@@ -194,13 +205,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         missIdxs.forEach((i, k) => {
           out[i] = predicted.labels?.[k] ?? 0;
         });
-        // 4) 분류 결과 temp 캐시 저장(키=마스크된 텍스트)
-        missIdxs.forEach((i, k) => {
-          const lbl = out[i];
-          if (lbl === 0 || lbl === 1 || lbl === 2) {
-            sendTrainingData(maskedTexts[i], lbl, 'cache', true).catch(() => {});
-          }
-        });
+        // 4) 분류 결과 temp 캐시 저장은 학습 모드에서만 수행한다.
+        // 운영 관점에서는 이 write 트래픽이 기준선을 왜곡할 수 있으므로,
+        // 재학습/수집을 하지 않을 때는 자동 저장을 끈다.
+        if (trainingMode) {
+          missIdxs.forEach((i) => {
+            const lbl = out[i];
+            if (lbl === 0 || lbl === 1 || lbl === 2) {
+              sendTrainingData(maskedTexts[i], lbl, 'cache', true).catch(() => {});
+            }
+          });
+        }
       }
 
       // 5) 룰 최소 심각도 적용(원문 기준)

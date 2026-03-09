@@ -76,6 +76,81 @@
 - 단일 ECS 서비스로 추론 API 운영 가능
 - Terraform으로 dev 환경 1회 배포 가능
 
+현재 저장소 반영 상태:
+
+- 완료: `server/Dockerfile` 추가
+- 완료: `server/.env.example` 추가
+- 완료: `server/app.py` 환경변수 기반 설정 구조화
+- 완료: `server/app.py` 선택적 API Key 인증 추가
+- 완료: `server/app.py` `/health/live`, `/health/ready` 추가
+- 완료: `extension/options.html`, `extension/background.js`, `extension/popup.js`에 선택적 `X-API-Key` 연동 추가
+- 완료: `server/app.py` 실시간 트래픽 계측 로그(`PREDICT_METRIC`, `TRAFFIC_SNAPSHOT`) 추가
+- 완료: 학습 모드가 꺼져 있으면 `training_temp` 자동 저장 비활성화
+- 완료: 앱 레벨 rate limit 적용 (`/predict`, `/training-data/lookup`, `/training-data`)
+
+Phase 0 로컬 실행 예시:
+
+```bash
+docker build -f server/Dockerfile -t ylcf:phase0 .
+docker run --rm -p 8000:8000 --env-file server/.env.example ylcf:phase0
+```
+
+Phase 0 보안 실행 예시:
+
+```bash
+docker run --rm -p 8000:8000 ^
+  -e HOST=0.0.0.0 ^
+  -e PORT=8000 ^
+  -e API_KEY=change-me ^
+  -e ENFORCE_AUTH=true ^
+  -e ALLOWED_ORIGINS=http://localhost,http://127.0.0.1 ^
+  ylcf:phase0
+```
+
+헬스체크 예시:
+
+- liveness: `GET /health/live`
+- readiness: `GET /health/ready`
+- legacy compatibility: `GET /health`
+- live metrics: `GET /metrics/live`
+
+Phase 0 rate limit 기본값:
+
+- `/predict`: 클라이언트당 분당 120회
+- `/training-data/lookup`: 클라이언트당 분당 180회
+- `/training-data`: 클라이언트당 분당 30회
+- 초과 시: `429 Too Many Requests`
+- 헤더: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After`
+
+Phase 0 관측 로그 예시:
+
+- `PREDICT_METRIC`
+  - 요청 1건 기준 로그
+  - 배치 크기(`batch_size`)
+  - 총 문자 수(`characters`)
+  - 추론 지연시간(`latency_ms`)
+  - 라벨 분포(`normal`, `borderline_abusive`, `abusive`)
+  - 호출자 식별값(`client = ip|origin`)
+- `TRAFFIC_SNAPSHOT`
+  - 누적 HTTP 요청 수
+  - 분당 predict 요청 수
+  - 분당 분류 텍스트 수
+  - 평균/최대 배치 크기
+  - 평균/p50/p95 추론 지연시간
+  - 상태코드 분포
+  - 상위 호출자(top clients)
+  - 인증 실패 수
+  - rate limit 차단 수(`rate_limit_rejections_total`)
+  - 최대 동시 요청 수
+
+이 로그를 먼저 1~2일 수집한 뒤 rate limit을 적용하면 다음을 전후 비교할 수 있다.
+
+- p95 latency가 줄었는지
+- 한 클라이언트가 전체 요청의 몇 %를 차지하는지
+- 배치 크기가 실제로 어느 범위인지
+- 분당 요청 수의 피크가 얼마인지
+- rate limit 이후 401/429가 얼마나 발생하는지
+
 ---
 
 ### Phase 1 (2~4주): AWS 최소 운영 아키텍처
@@ -107,6 +182,67 @@
 
 - `main` 머지 시 dev 자동 배포
 - 수동 승인 후 prod 배포
+
+현재 저장소 반영 상태:
+
+- 시작됨: `infra/` Terraform 디렉터리 추가
+- 시작됨: `infra/modules/network`로 VPC, public/private subnet, NAT, route table 구성
+- 시작됨: `infra/modules/ecr`로 애플리케이션 이미지 저장소 구성
+- 시작됨: `infra/modules/observability`로 CloudWatch Log Group 구성
+- 시작됨: `infra/modules/ssm_parameters`로 `API_KEY` 등 런타임 비밀값 저장 시작
+- 시작됨: `infra/modules/ecs_service`로 ECS Fargate + ALB dev 서비스 골격 구성
+- 시작됨: `infra/modules/api_gateway`로 HTTP API 프록시 진입점 구성
+- 시작됨: `infra/modules/waf`로 ALB 앞단 WAF 기본 규칙 구성
+- 시작됨: `infra/modules/github_oidc_roles`로 GitHub Actions용 IAM Role 코드화
+- 시작됨: `infra/environments/prod`로 prod 환경 골격 추가
+- 시작됨: `.github/workflows/terraform-infra.yml` 추가
+- 시작됨: `.github/workflows/deploy-app.yml` 추가
+
+현재 단계에서 의도적으로 남겨둔 것:
+
+- 아직 미적용: 원격 Terraform backend(S3 + DynamoDB) 실제 연결
+- 아직 미적용: Route53 custom domain / ACM HTTPS 인증서
+- 아직 미적용: API Gateway private integration(VPC Link)
+
+설명:
+
+- 지금 Phase 1은 "AWS dev 배포 골격"을 먼저 만드는 단계다.
+- Edge는 우선 `API Gateway -> public ALB -> ECS(Fargate)`로 구성했다.
+- WAF는 ALB에 먼저 붙였다. 이유는 API Gateway HTTP API에 비해 ALB 연결이 단순하고, Phase 1에서 실제 방어층을 가장 빠르게 확보할 수 있기 때문이다.
+- 즉 방향은 여전히 `Chrome Extension -> API Gateway/WAF -> ECS(Fargate)`가 맞고, 지금 저장소는 그 방향의 dev 최소 구현까지 들어간 상태다.
+- 여기에 더해 prod 환경과 GitHub OIDC Role 코드까지 추가했기 때문에, 이제 남은 건 "실계정 값 주입"과 "terraform apply"다.
+
+Phase 1 실제 적용 전에 사용자가 준비해야 하는 값:
+
+1. AWS 기본 정보
+- AWS Account ID
+- 배포 리전 (예: `ap-northeast-2`)
+- Terraform state용 S3 bucket 이름/ARN
+- Terraform lock용 DynamoDB table 이름/ARN
+
+2. GitHub 연동 정보
+- GitHub repository 이름 (`owner/repo`)
+- GitHub OIDC provider ARN
+- GitHub Actions가 assume할 Terraform role 이름
+- GitHub Actions가 assume할 deploy role 이름
+
+3. 애플리케이션 런타임 값
+- Chrome extension ID
+- 실제 `API_KEY`
+- 허용 origin 정책
+
+4. 운영용 선택 사항
+- Route53 hosted zone
+- ACM certificate ARN
+- custom domain 이름
+
+Phase 1 적용 순서:
+
+1. `infra/environments/dev/terraform.tfvars.example`를 복사해 실제 값 채우기
+2. 필요 시 `infra/environments/prod/terraform.tfvars.example`도 채우기
+3. remote backend를 쓸 경우 `backend.hcl.example` 기반으로 실제 backend 파일 준비
+4. AWS 자격증명 또는 SSO로 `terraform init`, `plan`, `apply`
+5. apply 결과의 `api_gateway_endpoint`를 확장 프로그램 서버 주소로 설정
 
 ---
 
@@ -573,4 +709,3 @@ jobs:
 2. `SECURITY.md`: 인증/권한/키 회전 정책
 3. `SLO.md`: 목표 지표와 에러 버짓
 4. `MLOPS.md`: 데이터셋/모델 승격 기준
-

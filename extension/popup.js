@@ -1,15 +1,22 @@
-const DEF = { enabled: true, minSeverityToHide: 2, action: 'hide', showBadge: true, trainingMode: false, serverUrl: 'http://127.0.0.1:8000', useExternalServer: false, rules: [], masks: [] };
+const DEF = { enabled: true, minSeverityToHide: 2, action: 'hide', showBadge: true, trainingMode: false, serverUrl: 'http://127.0.0.1:8000', apiKey: '', useExternalServer: false, rules: [], masks: [] };
 function getValues(){ return new Promise(r => chrome.storage.local.get(DEF, r)); }
 function setValues(v){ return new Promise(r => chrome.storage.local.set(v, r)); }
 
+function buildApiHeaders(apiKey, contentType = false) {
+	const headers = {};
+	if (contentType) headers['Content-Type'] = 'application/json';
+	if (apiKey) headers['X-API-Key'] = apiKey;
+	return headers;
+}
+
 async function getTrainingStats() {
-	const { serverUrl, useExternalServer } = await getValues();
+	const { serverUrl, apiKey, useExternalServer } = await getValues();
 	if (useExternalServer) {
 		return { total_samples: 0, label_distribution: { 정상: 0, 약간_악성: 0, 악성: 0 } };
 	}
 	try {
 		// 영구 데이터만 (사용자가 클릭해서 수집한 데이터)
-		const response = await fetch(`${serverUrl}/training-data/stats`);
+		const response = await fetch(`${serverUrl}/training-data/stats`, { headers: buildApiHeaders(apiKey) });
 		if (response.ok) {
 			return await response.json();
 		}
@@ -20,56 +27,56 @@ async function getTrainingStats() {
 }
 
 async function getTrainingFiles() {
-    const { serverUrl, useExternalServer } = await getValues();
+    const { serverUrl, apiKey, useExternalServer } = await getValues();
     if (useExternalServer) return { files: [] };
-    const res = await fetch(`${serverUrl}/training-data/files`);
+    const res = await fetch(`${serverUrl}/training-data/files`, { headers: buildApiHeaders(apiKey) });
     if (!res.ok) return { files: [] };
     return await res.json();
 }
 
 async function getTrainingFileContent(filename) {
-    const { serverUrl, useExternalServer } = await getValues();
+    const { serverUrl, apiKey, useExternalServer } = await getValues();
     if (useExternalServer) return { data: [] };
-    const res = await fetch(`${serverUrl}/training-data/files/${filename}`);
+    const res = await fetch(`${serverUrl}/training-data/files/${filename}`, { headers: buildApiHeaders(apiKey) });
     if (!res.ok) return { data: [] };
     return await res.json();
 }
 
 async function deleteTrainingFile(filename) {
-    const { serverUrl, useExternalServer } = await getValues();
+    const { serverUrl, apiKey, useExternalServer } = await getValues();
     if (useExternalServer) return false;
-    const res = await fetch(`${serverUrl}/training-data/files/${filename}`, { method: 'DELETE' });
+    const res = await fetch(`${serverUrl}/training-data/files/${filename}`, { method: 'DELETE', headers: buildApiHeaders(apiKey) });
     return res.ok;
 }
 
 async function deleteTrainingLine(filename, lineNumber) {
-    const { serverUrl, useExternalServer } = await getValues();
+    const { serverUrl, apiKey, useExternalServer } = await getValues();
     if (useExternalServer) return false;
-    const res = await fetch(`${serverUrl}/training-data/files/${filename}/lines/${lineNumber}`, { method: 'DELETE' });
+    const res = await fetch(`${serverUrl}/training-data/files/${filename}/lines/${lineNumber}`, { method: 'DELETE', headers: buildApiHeaders(apiKey) });
     return res.ok;
 }
 
 async function deleteAllTrainingData() {
-    const { serverUrl, useExternalServer } = await getValues();
+    const { serverUrl, apiKey, useExternalServer } = await getValues();
     if (useExternalServer) return false;
-    const res = await fetch(`${serverUrl}/training-data/all`, { method: 'DELETE' });
+    const res = await fetch(`${serverUrl}/training-data/all`, { method: 'DELETE', headers: buildApiHeaders(apiKey) });
     return res.ok;
 }
 
 async function deleteTempOnly() {
-    const { serverUrl, useExternalServer } = await getValues();
+    const { serverUrl, apiKey, useExternalServer } = await getValues();
     if (useExternalServer) return false;
-    const res = await fetch(`${serverUrl}/training-data/temp`, { method: 'DELETE' });
+    const res = await fetch(`${serverUrl}/training-data/temp`, { method: 'DELETE', headers: buildApiHeaders(apiKey) });
     return res.ok;
 }
 
 async function startRetraining() {
-	const { serverUrl, useExternalServer } = await getValues();
+	const { serverUrl, apiKey, useExternalServer } = await getValues();
 	if (useExternalServer) {
 		return { success: false, message: '외부 서버 모드에서는 재학습을 지원하지 않습니다.' };
 	}
 	try {
-		const response = await fetch(`${serverUrl}/model/retrain`, { method: 'POST' });
+		const response = await fetch(`${serverUrl}/model/retrain`, { method: 'POST', headers: buildApiHeaders(apiKey) });
 		return await response.json();
 	} catch (e) {
 		console.warn('Failed to start retraining:', e);
@@ -78,12 +85,12 @@ async function startRetraining() {
 }
 
 async function reloadModel() {
-	const { serverUrl, useExternalServer } = await getValues();
+	const { serverUrl, apiKey, useExternalServer } = await getValues();
 	if (useExternalServer) {
 		return { success: false, message: '외부 서버 모드에서는 모델 재로드를 지원하지 않습니다.' };
 	}
 	try {
-		const response = await fetch(`${serverUrl}/model/reload`, { method: 'POST' });
+		const response = await fetch(`${serverUrl}/model/reload`, { method: 'POST', headers: buildApiHeaders(apiKey) });
 		return await response.json();
 	} catch (e) {
 		console.warn('Failed to reload model:', e);
@@ -92,12 +99,12 @@ async function reloadModel() {
 }
 
 async function getTrainingStatus() {
-	const { serverUrl, useExternalServer } = await getValues();
+	const { serverUrl, apiKey, useExternalServer } = await getValues();
 	if (useExternalServer) {
 		return { is_training: false, progress: 0, message: '', error: null };
 	}
 	try {
-		const response = await fetch(`${serverUrl}/model/training-status`);
+		const response = await fetch(`${serverUrl}/model/training-status`, { headers: buildApiHeaders(apiKey) });
 		if (response.ok) {
 			return await response.json();
 		}

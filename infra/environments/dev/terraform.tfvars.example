@@ -1,0 +1,5 @@
+aws_region            = "ap-northeast-2"
+project_name          = "ylcf-dev"
+github_repository     = "your-org/youtube_live_comment_filter"
+allowed_extension_ids = ["your_chrome_extension_id"]
+api_key_placeholder   = "CHANGE_ME_BEFORE_PUBLIC_ACCESS"

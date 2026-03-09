@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+test
+youtube_live_filter_server
+server/5.13.0
+server/*.spec
+server/*.bat
+server/*.ps1
+user_data
