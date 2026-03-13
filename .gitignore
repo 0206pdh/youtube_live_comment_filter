@@ -26,6 +26,7 @@ model_backup/
 model_updated/
 training_data/
 training_temp/
+user_data/
 *.safetensors
 *.bin
 *.pt
@@ -45,9 +46,15 @@ server/dist/
 
 # Terraform
 .terraform/
+.terraform.tfstate.lock.info
 *.tfstate
 *.tfstate.*
 *.tfplan
 infra/environments/*/terraform.tfvars
 infra/environments/*/backend.hcl
+
+# Local secrets / credentials
+*.pem
+*.key
+*.crt
 

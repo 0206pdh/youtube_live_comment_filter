@@ -1,6 +1,8 @@
 terraform {
   required_version = ">= 1.6.0"
 
+  backend "s3" {}
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -118,6 +120,24 @@ module "waf" {
   resource_arn = module.ecs_service.alb_arn
 }
 
+# Dev also gets OIDC roles so GitHub Actions can run against the dev account
+# without long-lived static AWS keys. This keeps the dev workflow aligned with
+# the eventual prod operating model rather than using a one-off auth pattern.
+module "github_oidc_roles" {
+  count  = var.oidc_provider_arn != "" ? 1 : 0
+  source = "../../modules/github_oidc_roles"
+
+  name                       = local.app_name
+  github_repository          = var.github_repository
+  oidc_provider_arn          = var.oidc_provider_arn
+  terraform_state_bucket_arn = var.terraform_state_bucket_arn
+  terraform_lock_table_arn   = var.terraform_lock_table_arn
+  ssm_parameter_arns         = [module.ssm_parameters.parameter_arns["api_key"]]
+  ecr_repository_arns        = [module.ecr.repository_arn]
+  ecs_cluster_arns           = [module.ecs_service.cluster_arn]
+  ecs_service_arns           = [module.ecs_service.service_arn]
+}
+
 output "alb_dns_name" {
   description = "Direct ALB endpoint kept for diagnostics and health checks."
   value       = module.ecs_service.alb_dns_name
@@ -146,4 +166,14 @@ output "ecs_service_name" {
 output "waf_web_acl_name" {
   description = "WAF ACL attached to the ALB for baseline request filtering."
   value       = module.waf.web_acl_name
+}
+
+output "terraform_role_arn" {
+  description = "IAM role ARN assumed by the Terraform GitHub workflow."
+  value       = try(module.github_oidc_roles[0].terraform_role_arn, null)
+}
+
+output "deploy_role_arn" {
+  description = "IAM role ARN assumed by the application deploy workflow."
+  value       = try(module.github_oidc_roles[0].deploy_role_arn, null)
 }

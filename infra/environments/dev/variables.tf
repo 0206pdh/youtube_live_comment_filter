@@ -28,3 +28,21 @@ variable "api_key_placeholder" {
   sensitive   = true
   default     = "CHANGE_ME_BEFORE_PUBLIC_ACCESS"
 }
+
+variable "oidc_provider_arn" {
+  description = "Existing GitHub OIDC provider ARN."
+  type        = string
+  default     = ""
+}
+
+variable "terraform_state_bucket_arn" {
+  description = "Terraform remote state bucket ARN."
+  type        = string
+  default     = ""
+}
+
+variable "terraform_lock_table_arn" {
+  description = "Terraform lock table ARN."
+  type        = string
+  default     = ""
+}

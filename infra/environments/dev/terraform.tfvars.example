@@ -1,5 +1,8 @@
 aws_region            = "ap-northeast-2"
 project_name          = "ylcf-dev"
 github_repository     = "your-org/youtube_live_comment_filter"
-allowed_extension_ids = ["your_chrome_extension_id"]
+allowed_extension_ids = []
 api_key_placeholder   = "CHANGE_ME_BEFORE_PUBLIC_ACCESS"
+oidc_provider_arn          = "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+terraform_state_bucket_arn = "arn:aws:s3:::your-terraform-state-bucket"
+terraform_lock_table_arn   = "arn:aws:dynamodb:ap-northeast-2:<ACCOUNT_ID>:table/your-terraform-lock-table"

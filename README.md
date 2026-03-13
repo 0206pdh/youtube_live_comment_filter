@@ -211,6 +211,7 @@ Phase 0 관측 로그 예시:
 - WAF는 ALB에 먼저 붙였다. 이유는 API Gateway HTTP API에 비해 ALB 연결이 단순하고, Phase 1에서 실제 방어층을 가장 빠르게 확보할 수 있기 때문이다.
 - 즉 방향은 여전히 `Chrome Extension -> API Gateway/WAF -> ECS(Fargate)`가 맞고, 지금 저장소는 그 방향의 dev 최소 구현까지 들어간 상태다.
 - 여기에 더해 prod 환경과 GitHub OIDC Role 코드까지 추가했기 때문에, 이제 남은 건 "실계정 값 주입"과 "terraform apply"다.
+- dev 환경도 이제 `github_oidc_roles`를 포함하므로, dev apply 결과에서 Terraform/deploy role ARN을 직접 확인할 수 있다.
 
 Phase 1 실제 적용 전에 사용자가 준비해야 하는 값:
 
@@ -901,6 +902,8 @@ terraform -chdir=infra/environments/dev apply
 - `api_gateway_endpoint`
 - `alb_dns_name`
 - `ecr_repository_url`
+- `terraform_role_arn`
+- `deploy_role_arn`
 
 이 중에서 실제 클라이언트가 바라볼 값은:
 
@@ -1427,3 +1430,12 @@ jobs:
 2. `SECURITY.md`: 인증/권한/키 회전 정책
 3. `SLO.md`: 목표 지표와 에러 버짓
 4. `MLOPS.md`: 데이터셋/모델 승격 기준
+
+---
+
+## 14) Additional Docs
+
+- [RUNBOOK.md](./RUNBOOK.md): Incident response and alarm actions
+- [SECURITY.md](./SECURITY.md): Authentication, authorization, and key rotation policy
+- [SLO.md](./SLO.md): Service objectives and error budget policy
+- [MLOPS.md](./MLOPS.md): Dataset and model promotion criteria
