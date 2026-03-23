@@ -11,6 +11,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+try:
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+    _BOTO3_AVAILABLE = True
+except ImportError:
+    _BOTO3_AVAILABLE = False
+
+try:
+    import psycopg2
+    import psycopg2.extras
+    _PSYCOPG2_AVAILABLE = True
+except ImportError:
+    _PSYCOPG2_AVAILABLE = False
+
 import torch
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,6 +114,14 @@ class Settings(BaseModel):
     allowed_origins: List[str]
     allowed_extension_ids: Set[str]
     enforce_auth: bool = False
+    # Phase 2: cloud storage / async pipeline
+    training_data_bucket: Optional[str] = None
+    training_queue_url: Optional[str] = None
+    db_host: Optional[str] = None
+    db_port: int = 5432
+    db_name: str = "ylcf"
+    db_user: str = "ylcf_admin"
+    db_password: Optional[str] = None
 
 
 def load_settings() -> Settings:
@@ -136,10 +158,155 @@ def load_settings() -> Settings:
         allowed_origins=_parse_allowed_origins(),
         allowed_extension_ids=allowed_extension_ids,
         enforce_auth=_get_env_bool("ENFORCE_AUTH", bool(api_key)),
+        training_data_bucket=os.environ.get("TRAINING_DATA_BUCKET") or None,
+        training_queue_url=os.environ.get("TRAINING_QUEUE_URL") or None,
+        db_host=os.environ.get("DB_HOST") or None,
+        db_port=int(os.environ.get("DB_PORT", "5432")),
+        db_name=os.environ.get("DB_NAME", "ylcf"),
+        db_user=os.environ.get("DB_USER", "ylcf_admin"),
+        db_password=os.environ.get("DB_PASSWORD") or None,
     )
 
 
 SETTINGS = load_settings()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: S3 / SQS / RDS helpers
+# ---------------------------------------------------------------------------
+
+def _s3_client():
+    """Return a boto3 S3 client. Callers should guard with _BOTO3_AVAILABLE."""
+    return boto3.client("s3")
+
+
+def _sqs_client():
+    """Return a boto3 SQS client."""
+    return boto3.client("sqs")
+
+
+def _save_training_data_s3(
+    text: str, label: int, user_id: str, bucket: str, use_temp: bool
+) -> bool:
+    """Append a labeled sample to the daily JSONL file in S3."""
+    try:
+        s3 = _s3_client()
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        prefix = "training-temp" if use_temp else "training-data"
+        key = f"{prefix}/training_data_{date_str}.jsonl"
+
+        # Read existing content (if any) and append the new line.
+        existing = b""
+        try:
+            resp = s3.get_object(Bucket=bucket, Key=key)
+            existing = resp["Body"].read()
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "NoSuchKey":
+                raise
+
+        record = json.dumps(
+            {
+                "text": text,
+                "label": label,
+                "user_id": user_id,
+                "timestamp": datetime.now().isoformat(),
+            },
+            ensure_ascii=False,
+        )
+        new_content = existing + (record + "\n").encode("utf-8")
+        s3.put_object(Bucket=bucket, Key=key, Body=new_content)
+        LOGGER.info(
+            'Training data saved to S3: label=%s (%s) text="%s..."',
+            label,
+            LABEL_NAMES.get(label, "?"),
+            text[:50],
+        )
+        return True
+    except Exception as exc:
+        LOGGER.error("Failed to save training data to S3: %s", exc)
+        return False
+
+
+def _publish_training_job(queue_url: str, sample_count: int) -> bool:
+    """Send a training trigger message to SQS."""
+    try:
+        sqs = _sqs_client()
+        message = json.dumps(
+            {
+                "action": "retrain",
+                "triggered_at": datetime.now().isoformat(),
+                "sample_count": sample_count,
+            }
+        )
+        sqs.send_message(QueueUrl=queue_url, MessageBody=message)
+        LOGGER.info("Training job published to SQS: sample_count=%d", sample_count)
+        return True
+    except Exception as exc:
+        LOGGER.error("Failed to publish training job to SQS: %s", exc)
+        return False
+
+
+def _get_db_connection():
+    """Return a psycopg2 connection using SETTINGS. Caller must close it."""
+    return psycopg2.connect(
+        host=SETTINGS.db_host,
+        port=SETTINGS.db_port,
+        dbname=SETTINGS.db_name,
+        user=SETTINGS.db_user,
+        password=SETTINGS.db_password,
+        connect_timeout=5,
+    )
+
+
+def _ensure_training_runs_table() -> None:
+    """Create the training_runs table if it does not exist."""
+    if not _PSYCOPG2_AVAILABLE or not SETTINGS.db_host:
+        return
+    try:
+        conn = _get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS training_runs (
+                        id          SERIAL PRIMARY KEY,
+                        started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        status      TEXT NOT NULL DEFAULT 'queued',
+                        sample_count INT,
+                        triggered_by TEXT
+                    )
+                    """
+                )
+        conn.close()
+        LOGGER.info("training_runs table ready")
+    except Exception as exc:
+        LOGGER.warning("Could not initialize training_runs table: %s", exc)
+
+
+def _record_training_run(sample_count: int, triggered_by: str = "api") -> Optional[int]:
+    """Insert a new training run record and return its ID."""
+    if not _PSYCOPG2_AVAILABLE or not SETTINGS.db_host:
+        return None
+    try:
+        conn = _get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO training_runs (status, sample_count, triggered_by)
+                    VALUES ('queued', %s, %s)
+                    RETURNING id
+                    """,
+                    (sample_count, triggered_by),
+                )
+                row = cur.fetchone()
+        conn.close()
+        run_id = row[0] if row else None
+        LOGGER.info("Training run recorded in RDS: id=%s", run_id)
+        return run_id
+    except Exception as exc:
+        LOGGER.warning("Failed to record training run in RDS: %s", exc)
+        return None
 
 
 class PredictRequest(BaseModel):
@@ -550,7 +717,18 @@ def _enforce_temp_limit(max_items: int = 30) -> None:
 def save_training_data(
     text: str, label: int, user_id: str, use_temp: bool = False
 ) -> bool:
-    """Append one labeled sample to daily JSONL training data files."""
+    """Append one labeled sample to daily JSONL training data files.
+
+    When TRAINING_DATA_BUCKET is set the record is written to S3.
+    Otherwise it falls back to the local file system (local dev / EXE mode).
+    """
+    # Phase 2: write to S3 when bucket is configured
+    if _BOTO3_AVAILABLE and SETTINGS.training_data_bucket:
+        return _save_training_data_s3(
+            text, label, user_id, SETTINGS.training_data_bucket, use_temp
+        )
+
+    # Local fallback
     try:
         timestamp = datetime.now().isoformat()
         data = {
@@ -1165,12 +1343,39 @@ def reload_model() -> Dict[str, Any]:
 
 @app.post("/model/retrain")
 def start_retraining(background_tasks: BackgroundTasks) -> Dict[str, Any]:
-    """Trigger retraining in the background if no job is currently running."""
+    """Trigger retraining.
+
+    Phase 2: when TRAINING_QUEUE_URL is set, the job is published to SQS so a
+    separate training worker picks it up asynchronously. The training status
+    is also recorded in RDS for audit.
+
+    Fallback: when SQS is not configured, runs in a background thread (local /
+    single-instance mode).
+    """
     global TRAINING_STATUS
 
     if TRAINING_STATUS["is_training"]:
         return {"success": False, "message": "이미 학습이 진행 중입니다"}
 
+    # Count current samples for the job message / RDS record.
+    sample_count = 0
+    try:
+        for data_file in TRAINING_DATA_DIR.glob("training_data_*.jsonl"):
+            with open(data_file, "r", encoding="utf-8") as f:
+                sample_count += sum(1 for line in f if line.strip())
+    except Exception:
+        pass
+
+    # Phase 2: async via SQS
+    if _BOTO3_AVAILABLE and SETTINGS.training_queue_url:
+        _record_training_run(sample_count=sample_count, triggered_by="api")
+        ok = _publish_training_job(SETTINGS.training_queue_url, sample_count)
+        if ok:
+            return {"success": True, "message": "재학습 요청이 큐에 등록되었습니다 (async)"}
+        return {"success": False, "message": "SQS 메시지 전송 실패"}
+
+    # Local fallback: background thread
+    _record_training_run(sample_count=sample_count, triggered_by="api-local")
     background_tasks.add_task(run_training_background)
     return {"success": True, "message": "재학습이 시작되었습니다"}
 
@@ -1441,6 +1646,7 @@ def predict(req: PredictRequest, request: Request) -> PredictResponse:
 
 
 _initialize_model()
+_ensure_training_runs_table()
 
 
 if __name__ == "__main__":

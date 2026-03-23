@@ -66,7 +66,38 @@ module "ssm_parameters" {
       type        = "SecureString"
       value       = var.api_key_placeholder
     }
+    db_password = {
+      name        = "/${local.app_name}/db/DB_PASSWORD"
+      description = "RDS master password for the training metadata database."
+      type        = "SecureString"
+      value       = var.db_password
+    }
   }
+}
+
+module "s3" {
+  source = "../../modules/s3"
+
+  bucket_name   = "${local.app_name}-training-data"
+  force_destroy = true # dev: allow clean teardown
+}
+
+module "sqs" {
+  source = "../../modules/sqs"
+
+  name = "${local.app_name}-training-queue"
+}
+
+module "rds" {
+  source = "../../modules/rds"
+
+  name                      = "${local.app_name}-db"
+  vpc_id                    = module.network.vpc_id
+  subnet_ids                = module.network.private_subnet_ids
+  allowed_security_group_id = module.ecs_service.service_security_group_id
+  db_password               = var.db_password
+  skip_final_snapshot       = true
+  deletion_protection       = false
 }
 
 module "ecs_service" {
@@ -98,11 +129,71 @@ module "ecs_service" {
     ENFORCE_AUTH                 = "true"
     ALLOWED_ORIGINS              = "http://localhost,http://127.0.0.1"
     ALLOWED_EXTENSION_IDS        = join(",", var.allowed_extension_ids)
+    # Phase 2: S3 + SQS + RDS
+    TRAINING_DATA_BUCKET = module.s3.bucket_name
+    TRAINING_QUEUE_URL   = module.sqs.queue_url
+    DB_HOST              = module.rds.host
+    DB_PORT              = tostring(module.rds.port)
+    DB_NAME              = module.rds.db_name
+    DB_USER              = "ylcf_admin"
   }
 
   secrets = {
-    API_KEY = module.ssm_parameters.parameter_arns["api_key"]
+    API_KEY     = module.ssm_parameters.parameter_arns["api_key"]
+    DB_PASSWORD = module.ssm_parameters.parameter_arns["db_password"]
   }
+}
+
+# Grant the ECS task role access to S3 and SQS for Phase 2 data pipeline.
+resource "aws_iam_role_policy" "ecs_task_phase2" {
+  name = "${local.app_name}-task-phase2-policy"
+  role = module.ecs_service.task_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:DeleteObject",
+        ]
+        Resource = [
+          module.s3.bucket_arn,
+          "${module.s3.bucket_arn}/*",
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes",
+        ]
+        Resource = [module.sqs.queue_arn]
+      },
+    ]
+  })
+}
+
+# Allow the execution role to read the DB password from SSM.
+resource "aws_iam_role_policy" "execution_db_ssm" {
+  name = "${local.app_name}-execution-db-ssm"
+  role = "${local.app_name}-execution-role"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameters", "ssm:GetParameter"]
+        Resource = [module.ssm_parameters.parameter_arns["db_password"]]
+      }
+    ]
+  })
 }
 
 module "api_gateway" {
@@ -166,6 +257,21 @@ output "ecs_service_name" {
 output "waf_web_acl_name" {
   description = "WAF ACL attached to the ALB for baseline request filtering."
   value       = module.waf.web_acl_name
+}
+
+output "training_data_bucket" {
+  description = "S3 bucket for training data."
+  value       = module.s3.bucket_name
+}
+
+output "training_queue_url" {
+  description = "SQS queue URL for async training triggers."
+  value       = module.sqs.queue_url
+}
+
+output "rds_endpoint" {
+  description = "RDS PostgreSQL endpoint."
+  value       = module.rds.endpoint
 }
 
 output "terraform_role_arn" {

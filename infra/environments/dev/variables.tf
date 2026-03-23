@@ -46,3 +46,10 @@ variable "terraform_lock_table_arn" {
   type        = string
   default     = ""
 }
+
+variable "db_password" {
+  description = "RDS master password for the training metadata database."
+  type        = string
+  sensitive   = true
+  default     = "CHANGE_ME_BEFORE_PUBLIC_ACCESS"
+}

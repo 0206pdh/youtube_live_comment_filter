@@ -37,3 +37,18 @@ output "alb_zone_id" {
   description = "Hosted zone id of the ALB for future Route53 aliases."
   value       = aws_lb.this.zone_id
 }
+
+output "task_role_name" {
+  description = "ECS task IAM role name for attaching additional policies."
+  value       = aws_iam_role.task.name
+}
+
+output "task_role_arn" {
+  description = "ECS task IAM role ARN."
+  value       = aws_iam_role.task.arn
+}
+
+output "service_security_group_id" {
+  description = "Security group ID attached to ECS tasks."
+  value       = aws_security_group.service.id
+}
