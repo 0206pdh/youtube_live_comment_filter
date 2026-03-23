@@ -528,3 +528,96 @@ Worker가 학습 완료 후 검증 지표(F1-score 등)를 RDS에 기록.
 ---
 
 *최종 업데이트: 2026-03-23*
+
+---
+
+## 8. 비용 최적화 (Phase 2 후속)
+
+### 8-1. NAT Gateway 제거
+
+**변경:** `infra/modules/network/main.tf`에서 NAT Gateway 리소스 제거. ECS 서비스를 private subnet에서 public subnet으로 이동. `assign_public_ip = true` 설정.
+
+**제거 이유:**
+- NAT Gateway 비용: 고정 $0.059/시간 + 데이터 처리 $0.059/GB. 30일 기준 약 $42.5의 고정 비용.
+- dev 환경에서 트래픽이 미미한 상황에서는 데이터 처리 비용도 사실상 무시 가능하므로, 대부분이 고정 비용.
+- ECS 태스크가 ECR 이미지를 pull하거나 AWS API(S3, SQS, CloudWatch)를 호출할 때만 외부 통신이 필요한데, 공인 IP가 있으면 NAT 없이 직접 인터넷 게이트웨이로 나갈 수 있다.
+
+**대안 구조:**
+```
+기존: ECS (private subnet) → NAT Gateway → Internet Gateway → AWS API / ECR
+변경: ECS (public subnet, 공인 IP 할당) → Internet Gateway → AWS API / ECR
+```
+
+**보안 트레이드오프와 ALB SG 방어:**
+- 공인 IP를 가진 ECS 태스크는 이론상 직접 접근 가능하지만, ALB Security Group이 이를 차단한다.
+- ECS 태스크의 Security Group inbound 규칙: 오직 ALB SG에서 오는 8000 포트만 허용. 그 외 모든 inbound 차단.
+- 따라서 태스크의 공인 IP:8000으로 직접 접근 시도해도 SG 레벨에서 드롭된다.
+- 이 구조는 private subnet + NAT 방식과 보안 결과가 동일하다. 차이는 "네트워크 계층"으로 막느냐 "Security Group 계층"으로 막느냐다.
+
+**NAT Gateway를 없애도 되는 이유 요약:**
+| 보호 수단 | 위치 | 역할 |
+|---------|------|------|
+| ALB Security Group | ECS SG inbound 규칙 | 외부 → ECS 직접 접근 차단 |
+| WAF | ALB 앞단 | 악성 HTTP 요청 차단 |
+| API Gateway Throttling | API 레이어 | 요청 수 제한 |
+| In-process Rate Limiter | 앱 레이어 | 클라이언트별 분당 요청 제한 |
+
+NAT Gateway는 외부에서의 inbound를 막는 역할이 없다. inbound는 SG가 담당하고 NAT는 outbound 전용이다. outbound는 공인 IP + IGW로 대체 가능하다.
+
+---
+
+### 8-2. RDS 인스턴스 다운그레이드
+
+**변경:** `db.t4g.micro` → `db.t2.micro`
+
+**이유:**
+- `db.t4g.micro`는 ARM 기반으로 가격이 낮지만, AWS 프리 티어 대상이 아니다.
+- `db.t2.micro`는 AWS 프리 티어 대상 (12개월 무료, 이후 약 $12.41/월).
+- dev 환경에서 RDS에 저장하는 데이터는 `training_runs` 테이블의 메타데이터뿐이다. 연결 수도 ECS 태스크 1~2개 수준이므로 db.t2.micro로 충분.
+- 장기적으로는 Aurora Serverless v2로 교체 검토 (유휴 시 비용 0에 가까움).
+
+---
+
+### 8-3. 월 비용 변화
+
+| 항목 | Phase 2 직후 | 최적화 후 | 절감 |
+|------|------------|--------|------|
+| NAT Gateway | ~$42.5 | $0 | -$42.5 |
+| ECS Fargate (1 task) | ~$12 | ~$12 | - |
+| ALB | ~$16 | ~$16 | - |
+| RDS db.t4g.micro | ~$13 | $0 (t2.micro 프리티어) | -$13 |
+| S3 | ~$1 | ~$1 | - |
+| CloudWatch | ~$3 | ~$3 | - |
+| API Gateway | ~$4 | ~$4 | - |
+| **합계** | **~$91** | **~$36** | **-$55** |
+
+> 프리 티어 종료 후 RDS db.t2.micro는 ~$12.41/월로 전환.
+
+---
+
+## 9. 부하 테스트 전략
+
+### 왜 Phase 전환 전 부하 테스트가 필요한가
+
+Phase 전환은 단순한 기능 추가가 아니라 인프라 구조 자체가 바뀌는 이벤트다. 코드 리뷰와 단위 테스트는 로직 오류는 잡을 수 있지만, 실제 트래픽 하에서의 병목은 발견할 수 없다.
+
+예시:
+- Phase 0 → 1 전환: 로컬 FastAPI와 ECS Fargate는 네트워크 경로, cold start 특성, ALB 헬스체크 타이밍이 전혀 다르다.
+- Phase 1 → 2 전환: S3 저장 호출이 `/predict` 응답 시간에 영향을 줄 수 있다. 비동기로 분리했는지 반드시 확인 필요.
+- Phase 2 → 3 전환: Training Worker 분리 후 추론 태스크의 CPU 여유가 늘어나 latency가 개선되어야 한다. 개선되지 않으면 분리가 의미 없다.
+
+부하 테스트는 "이 구조가 의도한 대로 동작하는가"를 수치로 검증한다.
+
+### Phase별 통과 기준 요약
+
+| Phase 전환 | p95 Latency | 오류율 | 동시 사용자 (Soak) |
+|-----------|-------------|--------|-----------------|
+| Phase 0 → 1 | < 500ms | < 1% | 30 VU, 30분 |
+| Phase 1 → 2 | < 300ms | < 0.5% | 50 VU, 30분 |
+| Phase 2 → 3 | < 200ms | < 0.1% | 100 VU, 30분 |
+
+세 가지 시나리오(Baseline, Spike, Soak) 모두 통과해야 Phase 전환이 승인된다.
+
+### 자세한 내용
+
+상세 시나리오 정의, k6 스크립트, CloudWatch Logs Insights 쿼리, 결과 기록 양식은 [LOAD_TESTING.md](./LOAD_TESTING.md)를 참조한다.

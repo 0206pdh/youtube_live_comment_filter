@@ -26,6 +26,10 @@
 - GitHub Actions -> AWS: OIDC + IAM Role Assume
 - ECS task secret 주입: SSM Parameter Store
 - ALB 앞단 방어: AWS WAF
+- ECS tasks: public subnet 배치, ALB SG에서 오는 8000 포트 inbound만 허용 (그 외 모든 inbound 차단)
+- S3 (학습 데이터 버킷): 퍼블릭 접근 완전 차단 (`block_public_acls=true`, `restrict_public_buckets=true`, `ignore_public_acls=true`, `block_public_policy=true`)
+- SQS (학습 트리거 큐): ECS task role에만 `SendMessage` 권한 부여, 그 외 주체 접근 불가
+- RDS PostgreSQL: private subnet 배치, ECS service Security Group에서 오는 5432 포트만 inbound 허용
 
 주의:
 
@@ -190,7 +194,62 @@ ECS task role:
 - 악성 호출 source/IP 패턴 추적
 - CloudWatch 로그와 GitHub Actions 실행 이력 보관
 
-## 8. 향후 강화 계획
+## 8. ECS 공개 IP 보안
+
+### 배경: ECS가 public subnet에 있는 이유
+
+Phase 2 비용 최적화에서 NAT Gateway를 제거하고 ECS 태스크를 public subnet으로 이동했다. ECS 태스크에 공인 IP(`assign_public_ip = true`)가 할당되는 구조다.
+
+### "공인 IP가 있으면 외부에서 직접 접근 가능하지 않은가"에 대한 답
+
+아니다. Security Group이 이를 완전히 차단하기 때문이다.
+
+ECS 태스크 Security Group의 inbound 규칙:
+```
+허용: TCP 8000, Source = ALB Security Group ID
+거부: 그 외 모든 inbound (묵시적 deny-all)
+```
+
+ALB Security Group의 inbound 규칙:
+```
+허용: TCP 443 (HTTPS), Source = 0.0.0.0/0 (인터넷)
+거부: 그 외 모든 inbound
+```
+
+결과적으로 외부 → ECS 태스크 직접 접근 경로:
+```
+외부 클라이언트 → (ECS 공인 IP):8000  →  SG 레벨 드롭 (ALB SG가 source가 아님)
+```
+
+외부 → ALB → ECS 정상 경로:
+```
+외부 클라이언트 → ALB (443) → ALB SG 허용 → ECS (8000) → ECS SG 허용
+```
+
+### NAT Gateway 없이 이 구조가 충분한 이유
+
+| 보안 목표 | 달성 수단 |
+|---------|---------|
+| 외부 → ECS 직접 접근 차단 | ECS SG: ALB SG 소스만 허용 |
+| 악성 HTTP 트래픽 차단 | WAF: ALB 앞단 AWSManagedRulesCommonRuleSet |
+| 요청 폭주 방어 | API Gateway Throttling + In-process Rate Limiter |
+| 인증되지 않은 클라이언트 거절 | X-API-Key 인증 (ENFORCE_AUTH=true) |
+| DB 직접 접근 차단 | RDS private subnet + ECS SG만 허용 |
+
+NAT Gateway는 inbound를 막는 장치가 아니다. NAT는 outbound 전용이다. inbound 방어는 SG가 담당하므로 NAT Gateway 제거가 보안에 영향을 주지 않는다.
+
+### private subnet 대비 달라진 점
+
+| 항목 | private subnet + NAT | public subnet + SG |
+|------|---------------------|---------------------|
+| ECS outbound (ECR, S3 등) | NAT GW → IGW | 공인 IP → IGW |
+| 외부 → ECS inbound | 네트워크 계층에서 불가 | SG 계층에서 차단 |
+| 보안 결과 | 동일 | 동일 |
+| 월 비용 | +$42.5 (NAT GW) | 없음 |
+
+---
+
+## 9. 향후 강화 계획
 
 README의 다음 단계에서 아래 보안 강화를 목표로 한다.
 
@@ -200,7 +259,7 @@ README의 다음 단계에서 아래 보안 강화를 목표로 한다.
 - prod custom domain + ACM 기반 HTTPS 표준화
 - CloudTrail, GuardDuty, 추가 탐지 정책 활성화
 
-## 9. 공개 보고 정책
+## 10. 공개 보고 정책
 
 보안 취약점이 발견되면:
 

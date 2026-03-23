@@ -10,9 +10,12 @@
 - API Gateway HTTP API: 외부 공개 엔드포인트를 제공한다.
 - ALB: API Gateway 뒤에서 ECS 서비스로 트래픽을 전달한다.
 - ECS Fargate: FastAPI 앱 컨테이너를 실행한다.
-- SSM Parameter Store: `API_KEY`를 저장한다.
+- SSM Parameter Store: `API_KEY`, `DB_PASSWORD`를 저장한다.
 - CloudWatch Logs: FastAPI 로그, API Gateway 액세스 로그를 수집한다.
 - WAF: ALB 앞단의 기본 웹 방어 계층이다.
+- S3 (`ylcf-dev-training-data`): 학습 데이터 JSONL 저장소. `training-data/` (확정 데이터), `training-temp/` (임시 클릭 라벨 캐시) prefix 사용.
+- SQS (`ylcf-dev-training-queue`): `/model/retrain` 요청 시 비동기 학습 트리거 메시지를 발행하는 큐. DLQ(`ylcf-dev-training-queue-dlq`) 포함, 3회 실패 시 DLQ로 이동.
+- RDS PostgreSQL (`ylcf-dev-db`): `training_runs` 테이블에 재학습 실행 메타데이터 저장. private subnet 배치, ECS SG만 5432 접근 허용.
 
 현재 앱의 주요 엔드포인트:
 
@@ -302,3 +305,51 @@ README의 다음 단계 구현 후 이 문서를 확장해야 한다.
 - 모델 registry 승격/롤백 절차
 
 그 시점에는 추론 API 장애와 학습 파이프라인 장애를 분리해 운영한다.
+
+---
+
+## 7. 부하 테스트 절차
+
+### 언제 수행하는가
+
+**Phase 전환 전 반드시 수행한다.** 구체적으로:
+
+- Phase 0 → 1 전환 직전: ECS + ALB + API Gateway 구조가 기본 트래픽을 처리할 수 있는지 검증
+- Phase 1 → 2 전환 직전: S3/SQS/RDS 연동 후 추론 latency에 영향이 없는지 검증
+- Phase 2 → 3 전환 직전: Training Worker 분리 후 추론 성능이 기준을 충족하는지 검증
+- 인프라 구조 변경 (ECS 스펙 변경, ALB 설정 변경, 네트워크 구조 변경) 후
+- 모델 교체 후 (새 모델의 추론 속도가 SLO를 만족하는지)
+
+### 수행 절차
+
+1. dev 환경에 최신 코드와 인프라 적용이 완료되었는지 확인
+2. `/health/ready`가 200을 반환하는지 확인 (모델 로딩 완료 대기)
+3. `LOAD_TESTING.md`의 k6 스크립트 순서대로 실행:
+   - Baseline 시나리오 (`load_tests/baseline.js`)
+   - Spike 시나리오 (`load_tests/spike.js`)
+   - Soak 시나리오 (`load_tests/soak.js`)
+4. 각 시나리오 종료 후 CloudWatch Logs Insights 쿼리로 서버 측 latency, 오류율 확인
+5. ECS 태스크 재시작 여부, 메모리 사용량 추이 확인
+6. `LOAD_TESTING.md`의 결과 기록 양식에 수치를 채워 커밋
+
+### 결과 확인 방법
+
+**k6 터미널 출력에서 확인할 지표:**
+```
+http_req_duration............: avg=X p(95)=X
+http_req_failed..............: X% X out of X
+```
+
+**CloudWatch Logs Insights에서 확인할 지표:**
+- log group: `/ecs/ylcf-dev`
+- 쿼리 예시는 `LOAD_TESTING.md` 6장 참조
+
+**ECS 콘솔에서 확인할 지표:**
+- CloudWatch → ECS → 서비스 → 메트릭 탭: CPUUtilization, MemoryUtilization
+- ECS 서비스 이벤트 탭: 태스크 재시작 여부
+
+### 결과 기록 위치
+
+`load_tests/results/YYYY-MM-DD_phase_X_to_Y.md` 형식으로 저장하고 main 브랜치에 커밋한다.
+
+통과 기준과 결과 기록 양식 상세: [LOAD_TESTING.md](./LOAD_TESTING.md) 참조.
