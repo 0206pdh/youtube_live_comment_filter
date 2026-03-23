@@ -41,27 +41,6 @@ resource "aws_subnet" "private" {
   }
 }
 
-# Phase 1 keeps cost under control by using a single NAT gateway. That is good
-# enough for dev. Production can split NAT gateways per AZ later.
-resource "aws_eip" "nat" {
-  domain = "vpc"
-
-  tags = {
-    Name = "${var.name}-nat-eip"
-  }
-}
-
-resource "aws_nat_gateway" "this" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
-
-  tags = {
-    Name = "${var.name}-nat"
-  }
-
-  depends_on = [aws_internet_gateway.this]
-}
-
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.this.id
 
@@ -75,13 +54,10 @@ resource "aws_route_table" "public" {
   }
 }
 
+# Private subnets are used by RDS only. No internet route needed —
+# RDS never initiates outbound connections. NAT Gateway removed to cut dev cost.
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.this.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.this.id
-  }
 
   tags = {
     Name = "${var.name}-private-rt"

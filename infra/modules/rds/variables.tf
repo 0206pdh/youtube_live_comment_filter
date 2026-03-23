@@ -45,7 +45,7 @@ variable "engine_version" {
 variable "instance_class" {
   description = "RDS instance class."
   type        = string
-  default     = "db.t4g.micro"
+  default     = "db.t2.micro"
 }
 
 variable "allocated_storage" {

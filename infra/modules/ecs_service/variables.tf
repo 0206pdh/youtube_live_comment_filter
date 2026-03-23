@@ -19,8 +19,20 @@ variable "public_subnet_ids" {
 }
 
 variable "private_subnet_ids" {
-  description = "Private subnets used by ECS tasks."
+  description = "Private subnets used by ECS tasks (default) or passed through to task_subnet_ids."
   type        = list(string)
+}
+
+variable "task_subnet_ids" {
+  description = "Subnets where ECS tasks run. Defaults to private_subnet_ids. Override with public subnets when NAT Gateway is absent."
+  type        = list(string)
+  default     = []
+}
+
+variable "assign_public_ip" {
+  description = "Assign a public IP to ECS tasks. Required when tasks run in public subnets without a NAT Gateway."
+  type        = bool
+  default     = false
 }
 
 variable "container_image" {

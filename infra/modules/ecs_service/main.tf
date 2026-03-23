@@ -182,9 +182,9 @@ resource "aws_ecs_service" "this" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
     security_groups  = [aws_security_group.service.id]
-    subnets          = var.private_subnet_ids
+    subnets          = length(var.task_subnet_ids) > 0 ? var.task_subnet_ids : var.private_subnet_ids
   }
 
   load_balancer {

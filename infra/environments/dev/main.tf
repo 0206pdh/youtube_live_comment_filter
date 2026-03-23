@@ -110,6 +110,10 @@ module "ecs_service" {
   private_subnet_ids = module.network.private_subnet_ids
   log_group_name     = module.observability.log_group_name
 
+  # Dev: run tasks in public subnets with public IP — no NAT Gateway needed.
+  task_subnet_ids  = module.network.public_subnet_ids
+  assign_public_ip = true
+
   # Phase 1 deploys latest for dev simplicity. CI later pushes both latest and
   # immutable SHA tags. Production rollout should use immutable tags only.
   container_image = "${module.ecr.repository_url}:latest"
