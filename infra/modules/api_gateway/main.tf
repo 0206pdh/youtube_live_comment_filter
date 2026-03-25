@@ -21,6 +21,10 @@ resource "aws_apigatewayv2_integration" "proxy" {
   integration_uri        = var.target_base_url
   payload_format_version = "1.0"
   timeout_milliseconds   = 29000
+
+  request_parameters = {
+    "overwrite:path" = "$request.path"
+  }
 }
 
 # Forward every path to the upstream ALB. The ALB remains useful for health
