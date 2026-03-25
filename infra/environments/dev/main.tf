@@ -54,6 +54,16 @@ module "ecr" {
 module "observability" {
   source         = "../../modules/observability"
   log_group_name = local.log_group_name
+
+  # Phase 4: wire up CloudWatch alarms.
+  # alb_arn_suffix is the part after "loadbalancer/" in the ALB ARN, which is
+  # what the AWS/ApplicationELB metric dimension expects.
+  enable_alarms    = true
+  alb_arn_suffix   = split("loadbalancer/", module.ecs_service.alb_arn)[1]
+  ecs_cluster_name = module.ecs_service.cluster_name
+  ecs_service_name = module.ecs_service.service_name
+  sqs_dlq_name     = module.sqs.dlq_name
+  # sns_topic_arn left empty — notifications can be added when an SNS topic exists.
 }
 
 module "ssm_parameters" {
@@ -200,6 +210,66 @@ resource "aws_iam_role_policy" "execution_db_ssm" {
   })
 }
 
+# ---------------------------------------------------------------------------
+# Phase 3: Training Worker
+# ---------------------------------------------------------------------------
+# The worker runs the same Docker image as the API but overrides the CMD to
+# run worker.py. It consumes jobs from the SQS training queue so that BERT
+# fine-tuning never competes with /predict for CPU on the API tasks.
+
+module "ecs_worker" {
+  source = "../../modules/ecs_worker"
+
+  name       = local.app_name
+  aws_region = var.aws_region
+  vpc_id     = module.network.vpc_id
+
+  # Dev: public subnets, public IP (no NAT Gateway) — same pattern as API.
+  subnet_ids       = module.network.public_subnet_ids
+  assign_public_ip = true
+
+  cluster_id      = module.ecs_service.cluster_arn
+  container_image = "${module.ecr.repository_url}:latest"
+
+  # Worker is CPU-heavy (BERT fine-tuning). Give it more headroom than the
+  # API task so training doesn't starve while the API is also running.
+  cpu    = 1024
+  memory = 2048
+
+  training_data_bucket_arn = module.s3.bucket_arn
+  training_queue_arn       = module.sqs.queue_arn
+
+  environment = {
+    TRAINING_DATA_BUCKET = module.s3.bucket_name
+    TRAINING_QUEUE_URL   = module.sqs.queue_url
+    DB_HOST              = module.rds.host
+    DB_PORT              = tostring(module.rds.port)
+    DB_NAME              = module.rds.db_name
+    DB_USER              = "ylcf_admin"
+    MODEL_DIR            = "/app/model"
+    AWS_DEFAULT_REGION   = var.aws_region
+    LOG_LEVEL            = "INFO"
+  }
+
+  secrets = {
+    DB_PASSWORD = module.ssm_parameters.parameter_arns["db_password"]
+  }
+
+  secret_arns = [module.ssm_parameters.parameter_arns["db_password"]]
+}
+
+# Allow the worker to reach RDS on 5432.
+# The RDS module only accepts one primary SG; this rule adds the worker as
+# a second trusted source without modifying the module interface.
+resource "aws_vpc_security_group_ingress_rule" "rds_from_worker" {
+  security_group_id            = module.rds.security_group_id
+  referenced_security_group_id = module.ecs_worker.worker_security_group_id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+  description                  = "Allow training worker to reach PostgreSQL."
+}
+
 module "api_gateway" {
   source = "../../modules/api_gateway"
 
@@ -276,6 +346,16 @@ output "training_queue_url" {
 output "rds_endpoint" {
   description = "RDS PostgreSQL endpoint."
   value       = module.rds.endpoint
+}
+
+output "ecs_worker_service_name" {
+  description = "ECS worker service name used by CI/CD to force worker redeployment."
+  value       = module.ecs_worker.worker_service_name
+}
+
+output "worker_log_group_name" {
+  description = "CloudWatch log group for training worker output."
+  value       = module.ecs_worker.worker_log_group_name
 }
 
 output "terraform_role_arn" {

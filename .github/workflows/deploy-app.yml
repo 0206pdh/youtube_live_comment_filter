@@ -30,9 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     env:
-      ECR_REPOSITORY: ${{ vars.DEV_ECR_REPOSITORY }}
-      ECS_CLUSTER: ${{ vars.DEV_ECS_CLUSTER }}
-      ECS_SERVICE: ${{ vars.DEV_ECS_SERVICE }}
+      ECR_REPOSITORY:         ${{ vars.DEV_ECR_REPOSITORY }}
+      ECS_CLUSTER:            ${{ vars.DEV_ECS_CLUSTER }}
+      ECS_SERVICE:            ${{ vars.DEV_ECS_SERVICE }}
+      ECS_WORKER_SERVICE:     ${{ vars.DEV_ECS_WORKER_SERVICE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,38 +48,51 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Build the shared image once. Both the API service and the worker run
+      # the same image — the worker just overrides the CMD to run worker.py.
       - name: Build and push image
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -f server/Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker build -f server/Dockerfile \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      # Terraform pins the ECS task definition to :latest in dev. After a fresh
-      # image push, forcing a new deployment is enough to pull the latest image.
-      - name: Force ECS deployment
+      # Force both the API and the worker to pull the new image. The worker
+      # service name comes from the Terraform output ecs_worker_service_name.
+      - name: Force API deployment
         run: |
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
             --force-new-deployment
 
+      - name: Force Worker deployment
+        if: env.ECS_WORKER_SERVICE != ''
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_WORKER_SERVICE \
+            --force-new-deployment
+
       - name: Deployment note
         run: |
-          echo "Image pushed and ECS deployment triggered."
-          echo "The public client-facing endpoint remains the API Gateway created by Terraform."
+          echo "Image pushed and ECS deployments triggered (API + Worker)."
+          echo "Public endpoint: API Gateway created by Terraform."
 
   deploy-prod:
     if: github.event_name == 'workflow_dispatch' && inputs.target_environment == 'prod'
     runs-on: ubuntu-latest
     environment: prod
     env:
-      ECR_REPOSITORY: ${{ vars.PROD_ECR_REPOSITORY }}
-      ECS_CLUSTER: ${{ vars.PROD_ECS_CLUSTER }}
-      ECS_SERVICE: ${{ vars.PROD_ECS_SERVICE }}
+      ECR_REPOSITORY:         ${{ vars.PROD_ECR_REPOSITORY }}
+      ECS_CLUSTER:            ${{ vars.PROD_ECS_CLUSTER }}
+      ECS_SERVICE:            ${{ vars.PROD_ECS_SERVICE }}
+      ECS_WORKER_SERVICE:     ${{ vars.PROD_ECS_WORKER_SERVICE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -98,14 +112,24 @@ jobs:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -f server/Dockerfile -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker build -f server/Dockerfile \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      - name: Force ECS deployment
+      - name: Force API deployment
         run: |
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
+            --force-new-deployment
+
+      - name: Force Worker deployment
+        if: env.ECS_WORKER_SERVICE != ''
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_WORKER_SERVICE \
             --force-new-deployment

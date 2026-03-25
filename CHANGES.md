@@ -1,6 +1,6 @@
 # 아키텍처 변경 기록 및 설계 근거
 
-이 문서는 Phase 0부터 Phase 2까지 진행된 모든 변경 사항과 그 설계 근거를 기록한다.
+이 문서는 Phase 0부터 Phase 4까지 진행된 모든 변경 사항과 그 설계 근거를 기록한다.
 
 ---
 
@@ -12,7 +12,8 @@
 4. [Phase 2: 클라우드 데이터 파이프라인](#4-phase-2-클라우드-데이터-파이프라인)
 5. [설계 결정 요약](#5-설계-결정-요약)
 6. [로컬 개발 vs 클라우드 동작 비교](#6-로컬-개발-vs-클라우드-동작-비교)
-7. [다음 단계 (Phase 3 예정)](#7-다음-단계-phase-3-예정)
+7. [Phase 3: Training Worker 분리 + 모델 버전 관리](#7-phase-3-training-worker-분리--모델-버전-관리)
+8. [Phase 4: SLO 자동화 + CI/CD 완성](#8-phase-4-slo-자동화--cicd-완성)
 
 ---
 
@@ -496,38 +497,121 @@ if not _PSYCOPG2_AVAILABLE or not SETTINGS.db_host:
 
 ---
 
-## 7. 다음 단계 (Phase 3 예정)
+## 7. Phase 3: Training Worker 분리 + 모델 버전 관리
 
-### 7-1. Training Worker 분리
+*구현 날짜: 2026-03-25*
 
-SQS 큐를 소비하는 별도 ECS 서비스(Worker)를 추가한다.
-- Inference API: 상시 실행, CPU 최적화 (추론에 집중)
-- Training Worker: SQS 메시지 도착 시 실행, 메모리 최적화 (학습에 집중)
+### 7-1. 핵심 문제 — 추론/학습 CPU 경합
 
-### 7-2. 모델 레지스트리 (S3 기반)
+Phase 2까지 `app.py` 하나가 `/predict` 추론과 `/model/retrain` 학습을 동일 프로세스에서 처리했다. 재학습 요청이 들어오면 BERT 파인튜닝이 같은 0.5 vCPU를 차지해 추론 latency가 급등하는 구조였다.
 
-재학습 완료된 모델을 `s3://ylcf-dev-training-data/models/<version>/`에 저장.
-ECS 태스크 재시작 시 S3에서 최신 모델을 자동 로드.
+SQS 큐는 Phase 2에서 이미 배포되었지만 메시지를 소비하는 Worker가 없었다 — 큐에 쌓기만 하고 아무도 읽지 않는 상태.
 
-### 7-3. Rate Limiter → Redis
+### 7-2. 구현 내용
 
-현재 인메모리 Rate Limiter를 ElastiCache Redis 기반으로 교체.
-수평 확장 시 태스크 간 제한 카운터 공유.
+**`server/worker.py` (신규)**
 
-### 7-4. HTTPS + VPC Link
+SQS 롱폴링(WaitTimeSeconds=20) Worker. 메시지 수신 시:
+1. S3 `training-data/*.jsonl` 다운로드
+2. `train.py`의 `train_model()` 호출 (기존 코드 재사용)
+3. 성공 시 `s3://bucket/models/YYYYMMDD-HHMMSS/` 에 버전 업로드
+4. RDS `training_runs` 테이블에 status/model_version/completed_at 기록
+5. SQS 메시지 삭제
 
-API Gateway → VPC Link → ALB (내부) 구조로 전환.
-ALB를 internal로 변경하고 API Gateway가 VPC 내부를 통해 연결.
-ALB-ECS 구간도 HTTPS 적용.
+실패 시 SQS 메시지를 삭제하지 않는다 → visibility timeout 이후 자동으로 DLQ로 이동.
 
-### 7-5. 모델 승격 기준 자동화
+RDS 스키마는 worker가 기동 시 `ALTER TABLE ADD COLUMN IF NOT EXISTS`로 Phase 3 신규 컬럼(started_at, completed_at, model_version, error_message)을 추가한다.
 
-Worker가 학습 완료 후 검증 지표(F1-score 등)를 RDS에 기록.
-기준 이상일 때만 모델을 S3 레지스트리에 등록하고 Inference API에 reload 신호 전송.
+**`infra/modules/ecs_worker/` (신규 Terraform 모듈)**
+
+- ALB 없는 순수 Fargate 서비스 (outbound only)
+- API와 동일한 이미지, CMD만 `["python", "/app/server/worker.py"]`로 오버라이드
+- 전용 IAM Task Role: SQS Consume + S3 읽기/쓰기 (models/ 포함)
+- 전용 CloudWatch Log Group: `/ecs/{name}-worker`
+- Worker SG는 egress only — RDS ingress rule은 `dev/main.tf`에서 별도 추가
+
+**`infra/environments/dev/main.tf` 변경**
+
+- `module "ecs_worker"` 추가: cluster_id는 기존 API 클러스터 재사용, CPU 1024/Memory 2048 (BERT 학습용)
+- `aws_vpc_security_group_ingress_rule.rds_from_worker`: Worker SG → RDS 5432 허용
+- Terraform outputs에 `ecs_worker_service_name`, `worker_log_group_name` 추가
+
+### 7-3. 아키텍처 변화
+
+```
+Phase 2 (이전)
+───────────────
+[/model/retrain 요청]
+  → app.py (ECS Task)
+      ├── SQS에 메시지 전송 (큐에 쌓이지만 소비자 없음)
+      └── BackgroundTask로 즉시 학습 실행 ← 추론 CPU 경합 발생
+
+Phase 3 (이후)
+───────────────
+[/model/retrain 요청]
+  → app.py (ECS Task, 추론 전용)
+      └── SQS에 메시지 전송만 (즉시 응답)
+
+[SQS 큐]
+  └── worker.py (별도 ECS Task)
+        ├── S3에서 학습 데이터 다운로드
+        ├── train_model() 실행
+        ├── 완료 모델 → S3 models/{version}/
+        └── RDS training_runs 업데이트
+```
+
+### 7-4. Phase 3 이후 기대 latency 개선
+
+SLO.md Phase 2→3 전환 기준:
+
+| 시나리오 | Phase 2 기준 | Phase 3 목표 | 근거 |
+|---------|------------|------------|------|
+| Baseline p95 | < 300ms | **< 200ms** | 추론 태스크가 학습 CPU 경합에서 해방 |
+| Spike p95 | < 1500ms | **< 1000ms** | 동일 |
+| Soak (100 VU, 30분) p95 | < 500ms | **< 300ms** | 동일 |
+
+> 현재 Stage 3 Baseline p95 = 2,407ms. Worker 분리 후 재테스트 예정.
 
 ---
 
-*최종 업데이트: 2026-03-23*
+## 8. Phase 4: SLO 자동화 + CI/CD 완성
+
+*구현 날짜: 2026-03-25*
+
+### 8-1. CloudWatch Alarms (observability 모듈 확장)
+
+`infra/modules/observability/main.tf`에 3개 알람 추가:
+
+| 알람 이름 | 지표 | 임계값 | 의미 |
+|---------|------|--------|------|
+| `alb-5xx-high` | ALB HTTPCode_Target_5XX_Count | > 10 / 1분 | ECS 태스크 크래시 또는 내부 오류 |
+| `ecs-running-tasks-zero` | ECS RunningTaskCount | < 1 / 2분 연속 | 서비스 완전 다운 |
+| `training-dlq-not-empty` | SQS ApproximateNumberOfMessagesVisible (DLQ) | > 0 / 5분 | Worker 재학습 영구 실패 |
+
+알람은 `enable_alarms = true` 시 생성. `sns_topic_arn`이 비어있으면 CloudWatch에만 표시 (알림 없음). SNS 토픽 연결은 prod 환경 설정 시 추가.
+
+변수 추가: `alb_arn_suffix`, `ecs_cluster_name`, `ecs_service_name`, `sqs_dlq_name`, `sns_topic_arn`, `enable_alarms`.
+
+### 8-2. GitHub Actions CI/CD 완성 (deploy-app.yml)
+
+**변경 전**: API 이미지만 빌드/푸시, API ECS 서비스만 force redeploy.
+
+**변경 후**:
+1. 동일 이미지를 빌드 (API와 Worker는 같은 이미지, CMD만 다름)
+2. API ECS 서비스 force redeploy
+3. Worker ECS 서비스 force redeploy (`ECS_WORKER_SERVICE` 변수 설정 시)
+
+GitHub Actions 환경 변수 추가 필요:
+- `DEV_ECS_WORKER_SERVICE` = Terraform output `ecs_worker_service_name` 값
+- `PROD_ECS_WORKER_SERVICE` = prod 환경 worker 서비스 이름 (prod 배포 시)
+
+### 8-3. SQS DLQ 출력 추가
+
+`infra/modules/sqs/outputs.tf`에 `dlq_name` 출력 추가. observability 모듈이 DLQ CloudWatch 알람 dimension으로 사용.
+
+---
+
+*최종 업데이트: 2026-03-25*
 
 ---
 
