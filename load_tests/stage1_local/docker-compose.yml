@@ -1,0 +1,30 @@
+version: "3.9"
+
+# Stage 1: 단일 컨테이너 + 로컬 파일시스템
+# S3/RDS 없음 → training data는 컨테이너 내부 user_data/ 에 저장됨
+# 문제점 재현: 컨테이너가 재시작되면 데이터 소실
+
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - server_data:/app/user_data   # 로컬 볼륨 (컨테이너 삭제 시 소실)
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      LOG_LEVEL: "INFO"
+      ENFORCE_AUTH: "false"
+      ENABLE_RATE_LIMIT: "true"
+      RATE_LIMIT_WINDOW_SECONDS: "60"
+      PREDICT_RATE_LIMIT: "300"
+      LOOKUP_RATE_LIMIT: "300"
+      TRAINING_DATA_RATE_LIMIT: "100"
+      # TRAINING_DATA_BUCKET 없음 → 로컬 파일 폴백
+      # DB_HOST 없음 → RDS 미사용
+
+volumes:
+  server_data:

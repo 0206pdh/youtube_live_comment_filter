@@ -36,6 +36,13 @@ user_data/
 *.7z
 *.tar
 *.tar.gz
+*.msi
+
+# Load test raw data (large JSON)
+load_tests/results/*_raw.json
+
+# Claude Code internal
+.claude/
 
 # Build / Distribution artifacts
 server/build/

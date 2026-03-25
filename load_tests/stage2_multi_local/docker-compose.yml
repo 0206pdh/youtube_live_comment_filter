@@ -1,0 +1,50 @@
+version: "3.9"
+
+# Stage 2: 2개 컨테이너 + nginx 로드밸런서 + 로컬 파일시스템
+# 핵심 문제점 재현:
+#   - server_a / server_b 각자 다른 볼륨 보유
+#   - server_a에 저장한 학습 데이터를 server_b에서 조회하면 없음
+#   - 즉, 스케일 아웃 시 데이터 불일치 발생
+
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - server_a
+      - server_b
+
+  server_a:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    volumes:
+      - server_a_data:/app/user_data   # server_a 전용 로컬 스토리지
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      LOG_LEVEL: "INFO"
+      ENFORCE_AUTH: "false"
+      ENABLE_RATE_LIMIT: "false"   # nginx 뒤에서 rate limit 비활성화 (nginx 수준에서 분산)
+      INSTANCE_ID: "server_a"      # 어느 인스턴스가 응답했는지 확인용
+
+  server_b:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    volumes:
+      - server_b_data:/app/user_data   # server_b 전용 로컬 스토리지 (server_a와 격리)
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      LOG_LEVEL: "INFO"
+      ENFORCE_AUTH: "false"
+      ENABLE_RATE_LIMIT: "false"
+      INSTANCE_ID: "server_b"
+
+volumes:
+  server_a_data:
+  server_b_data:
