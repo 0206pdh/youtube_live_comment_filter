@@ -99,7 +99,7 @@ resource "aws_cloudwatch_log_group" "worker" {
 
 resource "aws_security_group" "worker" {
   name_prefix = "${var.name}-worker-"
-  description = "Training worker — egress only (SQS/S3 via HTTPS, RDS on 5432)."
+  description = "Training worker egress only: SQS, S3, RDS."
   vpc_id      = var.vpc_id
 
   egress {
