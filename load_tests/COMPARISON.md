@@ -8,12 +8,12 @@
 
 ## 환경 구성
 
-| 항목 | Stage 1 | Stage 2 | Stage 3 | Stage 3B |
-|------|---------|---------|---------|----------|
-| 컴퓨팅 | 단일 Docker | Docker 2개 + nginx | ECS Fargate 0.5 vCPU | **ECS Fargate 4 vCPU** |
+| 항목 | Stage 1 | Stage 2 | Stage 3 / Phase 3 | Stage 3B |
+|------|---------|---------|-------------------|----------|
+| 컴퓨팅 | 단일 Docker | Docker 2개 + nginx | ECS Fargate **0.5 vCPU** | **ECS Fargate 4 vCPU** |
 | 스토리지 | 로컬 파일시스템 | 로컬 파일시스템 (각자) | S3 | S3 |
 | DB | 없음 | 없음 | RDS PostgreSQL | RDS PostgreSQL |
-| Worker 분리 | 없음 | 없음 | 없음 | SQS + ECS Worker |
+| 재학습 처리 | API 백그라운드 스레드 (CPU 경합) | API 백그라운드 스레드 (CPU 경합) | **SQS + ECS Worker (독립 1 vCPU)** | SQS + ECS Worker (독립 1 vCPU) |
 | 스케일 아웃 | 불가 | 가능 (but 데이터 불일치) | 가능 (데이터 일관성 보장) | 가능 (데이터 일관성 보장) |
 
 ---
@@ -54,6 +54,26 @@
 > **Stage 1/2 Soak 미측정**: 로컬 환경 부하가 크고 Stage 3 비교 목적에 집중했기 때문.
 > **Stage 3 Soak 해석**: p95=9,469ms, 오류율 3%로 FAIL. 원인은 30 VU 동시 BERT 추론이 0.5 vCPU를 초과한 것.
 > **Stage 3B Soak**: p95=431ms, 오류율 0.004%로 **PASS**. 4 vCPU에서 30 VU 동시 BERT 추론 완전 처리.
+
+## 재학습 + 추론 동시 시나리오 (같은 vCPU 구조 비교)
+
+> **핵심 비교**: Stage 1 (백그라운드 스레드) vs Phase 3 (Worker 분리) — 동일하게 0.5 vCPU API 조건
+
+| 지표 | Stage 1 (백그라운드 스레드) | Phase 3 (Worker 분리) | 개선율 |
+|------|---------------------------|----------------------|--------|
+| p50 latency | 133 ms | **61 ms** | -54.1% |
+| p95 latency | **1,826 ms** | **107 ms** | **-94.1%** |
+| avg latency | 393 ms | 66 ms | -83.2% |
+| max latency | 4,058 ms | 327 ms | -91.9% |
+| 오류율 | **42.70%** | **0.00%** | 완전 해소 |
+| 총 요청 수 | 13,105건 | 18,408건 | +40.5% |
+| 통과 기준 (p95 < 500ms) | **FAIL ✗** | **PASS ✓** | |
+
+> **시나리오**: predict_load 10 VU 25분 + retrain_ctrl 5분 시점 1회 트리거
+> **Stage 1**: 재학습 트리거 직후 BERT fine-tuning이 API 프로세스 0.5 vCPU를 독점 → 추론 latency 1,826ms, 오류율 42.7%
+> **Phase 3**: Worker ECS가 SQS에서 독립 1 vCPU로 재학습 처리 → API 추론 영향 없음, p95=107ms 유지
+
+---
 
 ## 데이터 일관성 (Stage 2 전용)
 
@@ -121,5 +141,5 @@
 ---
 
 *최초 테스트: 2026-03-25 (Stage 1~Phase 3)*
-*재측정: 2026-03-26 (Stage 3B — ECS 4 vCPU)*
+*재측정: 2026-03-26 (Stage 3B — ECS 4 vCPU, 재학습 동시 시나리오 추가)*
 *테스터: 0206pdh*

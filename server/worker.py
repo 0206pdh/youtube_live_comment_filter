@@ -95,6 +95,7 @@ def ensure_schema(conn) -> None:
             ("completed_at",  "TIMESTAMPTZ"),
             ("model_version", "TEXT"),
             ("error_message", "TEXT"),
+            ("created_at",    "TIMESTAMPTZ DEFAULT NOW()"),
         ]:
             cur.execute(
                 f"ALTER TABLE training_runs ADD COLUMN IF NOT EXISTS {col} {defn}"
