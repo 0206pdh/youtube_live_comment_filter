@@ -128,6 +128,9 @@ module "ecs_service" {
   # immutable SHA tags. Production rollout should use immutable tags only.
   container_image = "${module.ecr.repository_url}:latest"
 
+  cpu    = 4096
+  memory = 8192
+
   environment = {
     HOST                         = "0.0.0.0"
     PORT                         = "8000"
