@@ -11,6 +11,11 @@ services:
       dockerfile: server/Dockerfile
     ports:
       - "8000:8000"
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: "8192M"
     volumes:
       - server_data:/app/user_data   # 로컬 볼륨 (컨테이너 삭제 시 소실)
     environment:
