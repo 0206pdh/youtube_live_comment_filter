@@ -1,7 +1,7 @@
-# Phase 1 keeps the API Gateway integration simple by proxying to the ALB's
-# public endpoint. This avoids VPC Link complexity during the first dev rollout.
-# In a later hardening step, the ALB can be made private and API Gateway can
-# switch to a VPC Link without changing clients.
+locals {
+  private_integration = var.target_listener_arn != ""
+}
+
 resource "aws_apigatewayv2_api" "this" {
   name          = "${var.name}-http-api"
   protocol_type = "HTTP"
@@ -14,11 +14,38 @@ resource "aws_apigatewayv2_api" "this" {
   }
 }
 
+resource "aws_security_group" "vpc_link" {
+  count = local.private_integration ? 1 : 0
+
+  name_prefix = "${var.name}-apigw-vpclink-"
+  description = "API Gateway VPC Link egress to the internal ALB."
+  vpc_id      = var.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  lifecycle { create_before_destroy = true }
+}
+
+resource "aws_apigatewayv2_vpc_link" "this" {
+  count = local.private_integration ? 1 : 0
+
+  name               = "${var.name}-vpc-link"
+  subnet_ids         = var.vpc_link_subnet_ids
+  security_group_ids = [aws_security_group.vpc_link[0].id]
+}
+
 resource "aws_apigatewayv2_integration" "proxy" {
   api_id                 = aws_apigatewayv2_api.this.id
   integration_type       = "HTTP_PROXY"
   integration_method     = "ANY"
-  integration_uri        = var.target_base_url
+  integration_uri        = local.private_integration ? var.target_listener_arn : var.target_base_url
+  connection_type        = local.private_integration ? "VPC_LINK" : "INTERNET"
+  connection_id          = local.private_integration ? aws_apigatewayv2_vpc_link.this[0].id : null
   payload_format_version = "1.0"
   timeout_milliseconds   = 29000
 
@@ -27,9 +54,7 @@ resource "aws_apigatewayv2_integration" "proxy" {
   }
 }
 
-# Forward every path to the upstream ALB. The ALB remains useful for health
-# checks and future blue/green traffic shifting, while API Gateway becomes the
-# public client-facing entry point.
+# Forward every path to the internal ALB through VPC Link.
 resource "aws_apigatewayv2_route" "root" {
   api_id    = aws_apigatewayv2_api.this.id
   route_key = "ANY /"
@@ -54,8 +79,8 @@ resource "aws_apigatewayv2_stage" "this" {
 
   default_route_settings {
     detailed_metrics_enabled = true
-    throttling_burst_limit   = 200
-    throttling_rate_limit    = 100
+    throttling_burst_limit   = var.throttling_burst_limit
+    throttling_rate_limit    = var.throttling_rate_limit
   }
 
   access_log_settings {

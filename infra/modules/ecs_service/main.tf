@@ -44,18 +44,23 @@ resource "aws_iam_role" "task" {
 
 resource "aws_ecs_cluster" "this" {
   name = "${var.name}-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
 
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb-sg"
-  description = "Allow public HTTP traffic to the ALB"
+  description = "Allow HTTP traffic from API Gateway VPC Link to the ALB"
   vpc_id      = var.vpc_id
 
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = length(var.alb_ingress_cidrs) > 0 ? var.alb_ingress_cidrs : ["0.0.0.0/0"]
   }
 
   egress {
@@ -88,10 +93,10 @@ resource "aws_security_group" "service" {
 
 resource "aws_lb" "this" {
   name               = substr(replace("${var.name}-alb", "_", "-"), 0, 32)
-  internal           = false
+  internal           = var.alb_internal
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = var.public_subnet_ids
+  subnets            = var.alb_internal ? var.private_subnet_ids : var.public_subnet_ids
 }
 
 resource "aws_lb_target_group" "this" {
@@ -181,6 +186,16 @@ resource "aws_ecs_service" "this" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  health_check_grace_period_seconds = 300
+
   network_configuration {
     assign_public_ip = var.assign_public_ip
     security_groups  = [aws_security_group.service.id]
@@ -194,4 +209,49 @@ resource "aws_ecs_service" "this" {
   }
 
   depends_on = [aws_lb_listener.http]
+}
+
+resource "aws_appautoscaling_target" "api" {
+  max_capacity       = var.autoscaling_max_capacity
+  min_capacity       = var.autoscaling_min_capacity
+  resource_id        = "service/${aws_ecs_cluster.this.name}/${aws_ecs_service.this.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "api_cpu" {
+  name               = "${var.name}-api-cpu-target"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.api.resource_id
+  scalable_dimension = aws_appautoscaling_target.api.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.api.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = var.autoscaling_cpu_target
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 30
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "api_requests" {
+  name               = "${var.name}-api-requests-target"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.api.resource_id
+  scalable_dimension = aws_appautoscaling_target.api.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.api.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 800
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 30
+
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "${aws_lb.this.arn_suffix}/${aws_lb_target_group.this.arn_suffix}"
+    }
+  }
 }

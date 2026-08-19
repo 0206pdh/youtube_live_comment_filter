@@ -51,6 +51,11 @@ server/dist/
 *.pkg
 *.pyz
 
+# Local browser profiles used for dashboard screenshots
+artifacts/grafana/profile-*/
+artifacts/grafana/edge-profile-*/
+artifacts/grafana/toxicfree-performance-dashboard.png
+
 # Terraform
 .terraform/
 .terraform.tfstate.lock.info

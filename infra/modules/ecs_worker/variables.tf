@@ -68,6 +68,11 @@ variable "training_queue_arn" {
   type        = string
 }
 
+variable "api_service_arn" {
+  description = "ECS API service ARN that the worker may roll after model promotion."
+  type        = string
+}
+
 variable "environment" {
   description = "Plain-text environment variables for the worker container."
   type        = map(string)

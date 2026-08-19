@@ -38,6 +38,21 @@ output "alb_zone_id" {
   value       = aws_lb.this.zone_id
 }
 
+output "alb_listener_arn" {
+  description = "ALB HTTP listener ARN used by API Gateway VPC Link."
+  value       = aws_lb_listener.http.arn
+}
+
+output "alb_arn_suffix" {
+  description = "ALB ARN suffix used by CloudWatch metrics."
+  value       = aws_lb.this.arn_suffix
+}
+
+output "target_group_arn_suffix" {
+  description = "Target group ARN suffix used by CloudWatch metrics."
+  value       = aws_lb_target_group.this.arn_suffix
+}
+
 output "task_role_name" {
   description = "ECS task IAM role name for attaching additional policies."
   value       = aws_iam_role.task.name

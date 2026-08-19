@@ -18,6 +18,18 @@ variable "public_subnet_ids" {
   type        = list(string)
 }
 
+variable "alb_internal" {
+  description = "Create an internal ALB for API Gateway VPC Link integration."
+  type        = bool
+  default     = true
+}
+
+variable "alb_ingress_cidrs" {
+  description = "CIDRs allowed to reach the ALB listener. Use the VPC CIDR for a private ALB."
+  type        = list(string)
+  default     = []
+}
+
 variable "private_subnet_ids" {
   description = "Private subnets used by ECS tasks (default) or passed through to task_subnet_ids."
   type        = list(string)
@@ -50,6 +62,24 @@ variable "desired_count" {
   description = "Desired ECS task count."
   type        = number
   default     = 1
+}
+
+variable "autoscaling_min_capacity" {
+  description = "Minimum number of API tasks."
+  type        = number
+  default     = 2
+}
+
+variable "autoscaling_max_capacity" {
+  description = "Maximum number of API tasks."
+  type        = number
+  default     = 10
+}
+
+variable "autoscaling_cpu_target" {
+  description = "Target average ECS CPU utilization percentage."
+  type        = number
+  default     = 55
 }
 
 variable "cpu" {

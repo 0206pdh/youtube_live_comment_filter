@@ -1,0 +1,66 @@
+{
+  "uid": "toxicfree-performance",
+  "title": "ToxicFree · Performance & MLOps",
+  "tags": ["k6", "ecs", "mlops"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": false,
+  "time": {"from": "now-30m", "to": "now"},
+  "panels": [
+    {
+      "id": 1, "type": "text", "title": "", "transparent": true,
+      "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0},
+      "options": {"mode": "markdown", "content": "# ToxicFree Performance & MLOps\n**Inference API · asynchronous retraining · zero-error serving**  \nTest records: 2026-03-26 · k6 baseline / soak / retraining concurrency"}
+    },
+    {
+      "id": 2, "type": "stat", "title": "Baseline p95 Latency", "datasource": {"type": "testdata", "uid": "load-test-results"},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 3},
+      "targets": [{"refId": "A", "scenarioId": "csv_content", "csvContent": "value\n97"}],
+      "fieldConfig": {"defaults": {"unit": "ms", "color": {"mode": "fixedColor", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 500}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Retraining p95 Latency", "datasource": {"type": "testdata", "uid": "load-test-results"},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 3},
+      "targets": [{"refId": "A", "scenarioId": "csv_content", "csvContent": "value\n107"}],
+      "fieldConfig": {"defaults": {"unit": "ms", "color": {"mode": "fixedColor", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 500}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 4, "type": "stat", "title": "Error Rate During Retraining", "datasource": {"type": "testdata", "uid": "load-test-results"},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 3},
+      "targets": [{"refId": "A", "scenarioId": "csv_content", "csvContent": "value\n0"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "decimals": 2, "color": {"mode": "fixedColor", "fixedColor": "green"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 5, "type": "stat", "title": "30-min Soak Throughput", "datasource": {"type": "testdata", "uid": "load-test-results"},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 3},
+      "targets": [{"refId": "A", "scenarioId": "csv_content", "csvContent": "value\n31.04"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "decimals": 2, "color": {"mode": "fixedColor", "fixedColor": "blue"}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}}
+    },
+    {
+      "id": 6, "type": "barchart", "title": "Retraining Isolation · p95 Latency", "datasource": {"type": "testdata", "uid": "load-test-results"},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 8},
+      "targets": [{"refId": "A", "scenarioId": "csv_content", "csvContent": "Architecture,p95_ms\nIn-process training,866\nSQS + isolated worker,107"}],
+      "fieldConfig": {"defaults": {"unit": "ms", "color": {"mode": "palette-classic"}, "custom": {"fillOpacity": 85, "lineWidth": 1}}, "overrides": []},
+      "options": {"orientation": "horizontal", "xTickLabelRotation": 0, "showValue": "always", "stacking": "none", "legend": {"displayMode": "list", "placement": "bottom", "showLegend": false}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "id": 7, "type": "barchart", "title": "Latency Across Test Scenarios", "datasource": {"type": "testdata", "uid": "load-test-results"},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8},
+      "targets": [{"refId": "A", "scenarioId": "csv_content", "csvContent": "Scenario,p50_ms,p95_ms\nBaseline 10 VU,59,97\nSoak 30 VU,190,431\nRetraining 10 VU,61,107"}],
+      "fieldConfig": {"defaults": {"unit": "ms", "color": {"mode": "palette-classic"}, "custom": {"fillOpacity": 80, "lineWidth": 1}}, "overrides": []},
+      "options": {"orientation": "auto", "xTickLabelRotation": 0, "showValue": "always", "stacking": "none", "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "id": 8, "type": "table", "title": "Verified Load-test Results", "datasource": {"type": "testdata", "uid": "load-test-results"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 17},
+      "targets": [{"refId": "A", "scenarioId": "csv_content", "csvContent": "Test,VUs,Duration,p50_ms,p95_ms,RPS,Error_pct,Result\nBaseline,10,5 min,59,97,9.37,0.00,PASS\nSoak,30,30 min,190,431,31.04,0.00,PASS\nRetraining concurrency,10,25 min,61,107,12.27,0.00,PASS"}],
+      "fieldConfig": {"defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}}, "overrides": [{"matcher": {"id": "byName", "options": "Result"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-text"}}, {"id": "mappings", "value": [{"type": "value", "options": {"PASS": {"color": "green", "index": 0, "text": "PASS"}}}]}]}]},
+      "options": {"showHeader": true, "cellHeight": "md", "footer": {"show": false}}
+    }
+  ]
+}

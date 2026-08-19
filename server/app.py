@@ -227,7 +227,7 @@ def _save_training_data_s3(
         return False
 
 
-def _publish_training_job(queue_url: str, sample_count: int) -> bool:
+def _publish_training_job(queue_url: str, sample_count: int, run_id: int) -> bool:
     """Send a training trigger message to SQS."""
     try:
         sqs = _sqs_client()
@@ -236,6 +236,7 @@ def _publish_training_job(queue_url: str, sample_count: int) -> bool:
                 "action": "retrain",
                 "triggered_at": datetime.now().isoformat(),
                 "sample_count": sample_count,
+                "run_id": run_id,
             }
         )
         sqs.send_message(QueueUrl=queue_url, MessageBody=message)
@@ -243,6 +244,7 @@ def _publish_training_job(queue_url: str, sample_count: int) -> bool:
         return True
     except Exception as exc:
         LOGGER.error("Failed to publish training job to SQS: %s", exc)
+        _fail_training_run(run_id, f"SQS message publish failed: {exc}")
         return False
 
 
@@ -270,13 +272,20 @@ def _ensure_training_runs_table() -> None:
                     """
                     CREATE TABLE IF NOT EXISTS training_runs (
                         id          SERIAL PRIMARY KEY,
-                        started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        started_at  TIMESTAMPTZ,
                         status      TEXT NOT NULL DEFAULT 'queued',
                         sample_count INT,
                         triggered_by TEXT
                     )
                     """
                 )
+                cur.execute(
+                    "ALTER TABLE training_runs ADD COLUMN IF NOT EXISTS created_at "
+                    "TIMESTAMPTZ DEFAULT NOW()"
+                )
+                cur.execute("ALTER TABLE training_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE training_runs ADD COLUMN IF NOT EXISTS error_message TEXT")
         conn.close()
         LOGGER.info("training_runs table ready")
     except Exception as exc:
@@ -307,6 +316,24 @@ def _record_training_run(sample_count: int, triggered_by: str = "api") -> Option
     except Exception as exc:
         LOGGER.warning("Failed to record training run in RDS: %s", exc)
         return None
+
+
+def _fail_training_run(run_id: Optional[int], error: str) -> None:
+    """Mark a queued run failed when its SQS publish did not succeed."""
+    if run_id is None or not _PSYCOPG2_AVAILABLE or not SETTINGS.db_host:
+        return
+    try:
+        conn = _get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE training_runs SET status = 'failed', completed_at = NOW(), "
+                    "error_message = %s WHERE id = %s",
+                    (error, run_id),
+                )
+        conn.close()
+    except Exception:
+        LOGGER.exception("Failed to mark training run %s failed", run_id)
 
 
 class PredictRequest(BaseModel):
@@ -344,6 +371,61 @@ def _load_model(model_dir: Path):
     return tokenizer, model, device
 
 
+def _sync_promoted_model(target_dir: Path) -> Optional[str]:
+    """Download the S3 model selected by models/latest.json before readiness."""
+    if not SETTINGS.training_data_bucket or not _BOTO3_AVAILABLE:
+        return None
+
+    s3 = _s3_client()
+    try:
+        pointer_obj = s3.get_object(
+            Bucket=SETTINGS.training_data_bucket,
+            Key="models/latest.json",
+        )
+    except Exception as exc:
+        error_code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        if error_code in {"NoSuchKey", "404"}:
+            LOGGER.info("No promoted model pointer found; using bundled model")
+            return None
+        raise
+
+    pointer = json.loads(pointer_obj["Body"].read().decode("utf-8"))
+    version = str(pointer.get("version", "")).strip()
+    if not version or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_." for ch in version):
+        raise RuntimeError("Invalid model version in models/latest.json")
+
+    staging = target_dir.with_name(f"{target_dir.name}-{version}.tmp")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    prefix = f"models/{version}/"
+    paginator = s3.get_paginator("list_objects_v2")
+    downloaded = 0
+    for page in paginator.paginate(Bucket=SETTINGS.training_data_bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            relative = key[len(prefix):]
+            if not relative:
+                continue
+            destination = staging / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(SETTINGS.training_data_bucket, key, str(destination))
+            downloaded += 1
+
+    if downloaded == 0:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError(f"Promoted model {version} has no artifacts")
+
+    backup = target_dir.with_name(f"{target_dir.name}.previous")
+    shutil.rmtree(backup, ignore_errors=True)
+    if target_dir.exists():
+        target_dir.replace(backup)
+    staging.replace(target_dir)
+    LOGGER.info("Downloaded promoted model version=%s files=%d", version, downloaded)
+    return version
+
+
 def _softmax(logits: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.softmax(logits, dim=-1)
 
@@ -351,6 +433,13 @@ def _softmax(logits: torch.Tensor) -> torch.Tensor:
 USER_DATA_PATH = get_user_data_path()
 UPDATED_MODEL_DIR = USER_DATA_PATH / "model"
 DEFAULT_MODEL_DIR = get_model_path()
+MODEL_VERSION = "bundled"
+try:
+    promoted_version = _sync_promoted_model(UPDATED_MODEL_DIR)
+    if promoted_version:
+        MODEL_VERSION = promoted_version
+except Exception:
+    LOGGER.exception("Failed to sync promoted model; falling back to local model")
 MODEL_DIR = (
     UPDATED_MODEL_DIR
     if UPDATED_MODEL_DIR.exists() and any(UPDATED_MODEL_DIR.iterdir())
@@ -1099,6 +1188,7 @@ def health_ready() -> JSONResponse:
             "status": "ready",
             "device": str(DEVICE),
             "model_dir": str(MODEL_DIR),
+            "model_version": MODEL_VERSION,
         },
     )
 
@@ -1368,8 +1458,10 @@ def start_retraining(background_tasks: BackgroundTasks) -> Dict[str, Any]:
 
     # Phase 2: async via SQS
     if _BOTO3_AVAILABLE and SETTINGS.training_queue_url:
-        _record_training_run(sample_count=sample_count, triggered_by="api")
-        ok = _publish_training_job(SETTINGS.training_queue_url, sample_count)
+        run_id = _record_training_run(sample_count=sample_count, triggered_by="api")
+        if run_id is None:
+            return {"success": False, "message": "재학습 실행 기록 생성 실패"}
+        ok = _publish_training_job(SETTINGS.training_queue_url, sample_count, run_id)
         if ok:
             return {"success": True, "message": "재학습 요청이 큐에 등록되었습니다 (async)"}
         return {"success": False, "message": "SQS 메시지 전송 실패"}

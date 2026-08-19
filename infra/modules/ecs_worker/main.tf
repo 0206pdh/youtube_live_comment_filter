@@ -63,6 +63,7 @@ resource "aws_iam_role_policy" "task_data" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
+          "s3:DeleteObject",
           "s3:ListBucket",
         ]
         Resource = [
@@ -76,9 +77,15 @@ resource "aws_iam_role_policy" "task_data" {
         Action = [
           "sqs:ReceiveMessage",
           "sqs:DeleteMessage",
+          "sqs:ChangeMessageVisibility",
           "sqs:GetQueueAttributes",
         ]
         Resource = [var.training_queue_arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecs:UpdateService", "ecs:DescribeServices"]
+        Resource = [var.api_service_arn]
       },
     ]
   })

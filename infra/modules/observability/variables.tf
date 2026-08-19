@@ -9,6 +9,12 @@ variable "retention_in_days" {
   default     = 30
 }
 
+variable "manage_log_group" {
+  description = "Create the application log group inside this module. Disable when the environment owns it to avoid dependency cycles."
+  type        = bool
+  default     = true
+}
+
 # ---------------------------------------------------------------------------
 # Phase 4: CloudWatch Alarms
 # ---------------------------------------------------------------------------
@@ -45,6 +51,34 @@ variable "sqs_dlq_name" {
 
 variable "sns_topic_arn" {
   description = "Optional SNS topic ARN for alarm notifications. Leave empty to skip."
+  type        = string
+  default     = ""
+}
+
+variable "aws_region" {
+  description = "AWS region displayed by dashboard widgets."
+  type        = string
+}
+
+variable "dashboard_name" {
+  description = "CloudWatch dashboard name."
+  type        = string
+}
+
+variable "worker_service_name" {
+  description = "ECS worker service name."
+  type        = string
+  default     = ""
+}
+
+variable "target_group_arn_suffix" {
+  description = "ALB target group ARN suffix."
+  type        = string
+  default     = ""
+}
+
+variable "sqs_queue_name" {
+  description = "Training queue name."
   type        = string
   default     = ""
 }

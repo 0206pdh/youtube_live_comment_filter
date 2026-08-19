@@ -8,6 +8,11 @@ output "queue_arn" {
   value       = aws_sqs_queue.this.arn
 }
 
+output "queue_name" {
+  description = "Training queue name used by CloudWatch dashboard dimensions."
+  value       = aws_sqs_queue.this.name
+}
+
 output "dlq_arn" {
   description = "Dead-letter queue ARN."
   value       = aws_sqs_queue.dlq.arn

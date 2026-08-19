@@ -71,3 +71,9 @@ variable "deletion_protection" {
   type        = bool
   default     = false
 }
+
+variable "multi_az" {
+  description = "Enable synchronous standby in another Availability Zone."
+  type        = bool
+  default     = true
+}

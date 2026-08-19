@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: ToxicFree Performance
+    orgId: 1
+    folder: ToxicFree
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 10
+    options:
+      path: C:/Users/0206p/youtube_live_comment_filter/grafana/dashboards
+

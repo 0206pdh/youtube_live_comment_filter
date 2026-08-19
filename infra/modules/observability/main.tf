@@ -1,4 +1,5 @@
 resource "aws_cloudwatch_log_group" "app" {
+  count             = var.manage_log_group ? 1 : 0
   name              = var.log_group_name
   retention_in_days = var.retention_in_days
 
@@ -15,10 +16,10 @@ resource "aws_cloudwatch_log_group" "app" {
 # environments that have not yet wired up ALB/ECS/SQS references.
 
 locals {
-  alarm_actions      = var.sns_topic_arn != "" ? [var.sns_topic_arn] : []
-  alb_ready          = var.enable_alarms && var.alb_arn_suffix != ""
-  ecs_ready          = var.enable_alarms && var.ecs_cluster_name != "" && var.ecs_service_name != ""
-  dlq_ready          = var.enable_alarms && var.sqs_dlq_name != ""
+  alarm_actions = var.sns_topic_arn != "" ? [var.sns_topic_arn] : []
+  alb_ready     = var.enable_alarms && var.alb_arn_suffix != ""
+  ecs_ready     = var.enable_alarms && var.ecs_cluster_name != "" && var.ecs_service_name != ""
+  dlq_ready     = var.enable_alarms && var.sqs_dlq_name != ""
 }
 
 # --- ALB: 5xx error rate ---------------------------------------------------
@@ -110,4 +111,112 @@ resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
   tags = {
     SLO = "training-pipeline"
   }
+}
+
+resource "aws_cloudwatch_metric_alarm" "alb_p95_latency" {
+  count = local.alb_ready && var.target_group_arn_suffix != "" ? 1 : 0
+
+  alarm_name          = "${var.log_group_name}/alb-p95-latency-high"
+  alarm_description   = "ALB target response p95 exceeds 500 ms for 5 minutes."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 5
+  datapoints_to_alarm = 3
+  threshold           = 0.5
+  treat_missing_data  = "notBreaching"
+
+  metric_name        = "TargetResponseTime"
+  namespace          = "AWS/ApplicationELB"
+  period             = 60
+  extended_statistic = "p95"
+  dimensions = {
+    LoadBalancer = var.alb_arn_suffix
+    TargetGroup  = var.target_group_arn_suffix
+  }
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "api_cpu_high" {
+  count = local.ecs_ready ? 1 : 0
+
+  alarm_name          = "${var.log_group_name}/api-cpu-high"
+  alarm_description   = "API service CPU exceeds 80 percent for 5 minutes."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 5
+  datapoints_to_alarm = 3
+  threshold           = 80
+  treat_missing_data  = "notBreaching"
+
+  metric_name = "CPUUtilization"
+  namespace   = "AWS/ECS"
+  period      = 60
+  statistic   = "Average"
+  dimensions = {
+    ClusterName = var.ecs_cluster_name
+    ServiceName = var.ecs_service_name
+  }
+
+  alarm_actions = local.alarm_actions
+  ok_actions    = local.alarm_actions
+}
+
+resource "aws_cloudwatch_dashboard" "service" {
+  dashboard_name = var.dashboard_name
+
+  dashboard_body = jsonencode({
+    start          = "-PT6H"
+    periodOverride = "inherit"
+    widgets = [
+      {
+        type = "metric", x = 0, y = 0, width = 12, height = 6
+        properties = {
+          title = "API latency and request volume", region = var.aws_region, view = "timeSeries", period = 60
+          metrics = [
+            ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", var.alb_arn_suffix, "TargetGroup", var.target_group_arn_suffix, { stat = "p95", label = "p95 latency" }],
+            [".", "RequestCount", ".", ".", ".", ".", { stat = "Sum", yAxis = "right", label = "requests/min" }]
+          ]
+        }
+      },
+      {
+        type = "metric", x = 12, y = 0, width = 12, height = 6
+        properties = {
+          title = "API errors", region = var.aws_region, view = "timeSeries", period = 60
+          metrics = [
+            ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", var.alb_arn_suffix, { stat = "Sum" }],
+            [".", "HTTPCode_Target_4XX_Count", ".", ".", { stat = "Sum" }]
+          ]
+        }
+      },
+      {
+        type = "metric", x = 0, y = 6, width = 12, height = 6
+        properties = {
+          title = "ECS API and worker utilization", region = var.aws_region, view = "timeSeries", period = 60
+          metrics = [
+            ["AWS/ECS", "CPUUtilization", "ClusterName", var.ecs_cluster_name, "ServiceName", var.ecs_service_name, { stat = "Average", label = "API CPU" }],
+            [".", ".", ".", ".", ".", var.worker_service_name, { stat = "Average", label = "Worker CPU" }],
+            [".", "MemoryUtilization", ".", ".", ".", var.ecs_service_name, { stat = "Average", label = "API memory" }]
+          ]
+        }
+      },
+      {
+        type = "metric", x = 12, y = 6, width = 12, height = 6
+        properties = {
+          title = "Training queue and DLQ", region = var.aws_region, view = "timeSeries", period = 60
+          metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", var.sqs_queue_name, { stat = "Maximum", label = "queued" }],
+            [".", ".", ".", var.sqs_dlq_name, { stat = "Maximum", label = "DLQ" }],
+            [".", "ApproximateAgeOfOldestMessage", ".", var.sqs_queue_name, { stat = "Maximum", yAxis = "right", label = "oldest age" }]
+          ]
+        }
+      },
+      {
+        type = "log", x = 0, y = 12, width = 24, height = 7
+        properties = {
+          title = "Recent application errors", region = var.aws_region, view = "table"
+          query = "SOURCE '${var.log_group_name}' | fields @timestamp, @message | filter @message like /ERROR|Exception|Traceback/ | sort @timestamp desc | limit 50"
+        }
+      }
+    ]
+  })
 }

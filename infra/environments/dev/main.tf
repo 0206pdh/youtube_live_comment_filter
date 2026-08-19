@@ -40,10 +40,16 @@ module "network" {
   source = "../../modules/network"
 
   name                 = local.app_name
+  aws_region           = var.aws_region
   vpc_cidr             = "10.40.0.0/16"
   availability_zones   = ["${var.aws_region}a", "${var.aws_region}c"]
   public_subnet_cidrs  = ["10.40.1.0/24", "10.40.2.0/24"]
   private_subnet_cidrs = ["10.40.11.0/24", "10.40.12.0/24"]
+}
+
+resource "aws_cloudwatch_log_group" "app" {
+  name              = local.log_group_name
+  retention_in_days = 30
 }
 
 module "ecr" {
@@ -52,17 +58,23 @@ module "ecr" {
 }
 
 module "observability" {
-  source         = "../../modules/observability"
-  log_group_name = local.log_group_name
+  source           = "../../modules/observability"
+  log_group_name   = local.log_group_name
+  manage_log_group = false
+  aws_region       = var.aws_region
+  dashboard_name   = "${local.app_name}-operations"
 
   # Phase 4: wire up CloudWatch alarms.
   # alb_arn_suffix is the part after "loadbalancer/" in the ALB ARN, which is
   # what the AWS/ApplicationELB metric dimension expects.
-  enable_alarms    = true
-  alb_arn_suffix   = split("loadbalancer/", module.ecs_service.alb_arn)[1]
-  ecs_cluster_name = module.ecs_service.cluster_name
-  ecs_service_name = module.ecs_service.service_name
-  sqs_dlq_name     = module.sqs.dlq_name
+  enable_alarms           = true
+  alb_arn_suffix          = module.ecs_service.alb_arn_suffix
+  target_group_arn_suffix = module.ecs_service.target_group_arn_suffix
+  ecs_cluster_name        = module.ecs_service.cluster_name
+  ecs_service_name        = module.ecs_service.service_name
+  worker_service_name     = module.ecs_worker.worker_service_name
+  sqs_queue_name          = module.sqs.queue_name
+  sqs_dlq_name            = module.sqs.dlq_name
   # sns_topic_arn left empty — notifications can be added when an SNS topic exists.
 }
 
@@ -95,7 +107,8 @@ module "s3" {
 module "sqs" {
   source = "../../modules/sqs"
 
-  name = "${local.app_name}-training-queue"
+  name                       = "${local.app_name}-training-queue"
+  visibility_timeout_seconds = 3600
 }
 
 module "rds" {
@@ -108,6 +121,7 @@ module "rds" {
   db_password               = var.db_password
   skip_final_snapshot       = true
   deletion_protection       = false
+  multi_az                  = false
 }
 
 module "ecs_service" {
@@ -118,11 +132,18 @@ module "ecs_service" {
   vpc_id             = module.network.vpc_id
   public_subnet_ids  = module.network.public_subnet_ids
   private_subnet_ids = module.network.private_subnet_ids
-  log_group_name     = module.observability.log_group_name
+  log_group_name     = aws_cloudwatch_log_group.app.name
+  alb_internal       = true
+  alb_ingress_cidrs  = ["10.40.0.0/16"]
 
-  # Dev: run tasks in public subnets with public IP — no NAT Gateway needed.
-  task_subnet_ids  = module.network.public_subnet_ids
-  assign_public_ip = true
+  task_subnet_ids          = module.network.private_subnet_ids
+  assign_public_ip         = false
+  desired_count            = 2
+  autoscaling_min_capacity = 2
+  # Account quota is currently 64 Fargate vCPU. With one 4-vCPU worker,
+  # 15 API tasks consume the remaining 60 vCPU at peak.
+  autoscaling_max_capacity = 15
+  autoscaling_cpu_target   = 55
 
   # Phase 1 deploys latest for dev simplicity. CI later pushes both latest and
   # immutable SHA tags. Production rollout should use immutable tags only.
@@ -140,12 +161,13 @@ module "ecs_service" {
     METRICS_LOG_INTERVAL_SECONDS = "60"
     ENABLE_RATE_LIMIT            = "true"
     RATE_LIMIT_WINDOW_SECONDS    = "60"
-    PREDICT_RATE_LIMIT           = "120"
-    LOOKUP_RATE_LIMIT            = "180"
-    TRAINING_DATA_RATE_LIMIT     = "30"
-    ENFORCE_AUTH                 = "true"
-    ALLOWED_ORIGINS              = "http://localhost,http://127.0.0.1"
-    ALLOWED_EXTENSION_IDS        = join(",", var.allowed_extension_ids)
+    # Dev is the controlled load-test target. Production keeps per-client limits.
+    PREDICT_RATE_LIMIT       = "100000"
+    LOOKUP_RATE_LIMIT        = "100000"
+    TRAINING_DATA_RATE_LIMIT = "10000"
+    ENFORCE_AUTH             = "true"
+    ALLOWED_ORIGINS          = "http://localhost,http://127.0.0.1"
+    ALLOWED_EXTENSION_IDS    = join(",", var.allowed_extension_ids)
     # Phase 2: S3 + SQS + RDS
     TRAINING_DATA_BUCKET = module.s3.bucket_name
     TRAINING_QUEUE_URL   = module.sqs.queue_url
@@ -227,20 +249,20 @@ module "ecs_worker" {
   aws_region = var.aws_region
   vpc_id     = module.network.vpc_id
 
-  # Dev: public subnets, public IP (no NAT Gateway) — same pattern as API.
-  subnet_ids       = module.network.public_subnet_ids
-  assign_public_ip = true
+  subnet_ids       = module.network.private_subnet_ids
+  assign_public_ip = false
 
   cluster_id      = module.ecs_service.cluster_arn
   container_image = "${module.ecr.repository_url}:latest"
 
   # Worker is CPU-heavy (BERT fine-tuning). Give it more headroom than the
   # API task so training doesn't starve while the API is also running.
-  cpu    = 1024
-  memory = 2048
+  cpu    = 4096
+  memory = 8192
 
   training_data_bucket_arn = module.s3.bucket_arn
   training_queue_arn       = module.sqs.queue_arn
+  api_service_arn          = module.ecs_service.service_arn
 
   environment = {
     TRAINING_DATA_BUCKET = module.s3.bucket_name
@@ -252,6 +274,8 @@ module "ecs_worker" {
     MODEL_DIR            = "/app/model"
     AWS_DEFAULT_REGION   = var.aws_region
     LOG_LEVEL            = "INFO"
+    ECS_CLUSTER          = module.ecs_service.cluster_name
+    ECS_API_SERVICE      = module.ecs_service.service_name
   }
 
   secrets = {
@@ -276,16 +300,21 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_worker" {
 module "api_gateway" {
   source = "../../modules/api_gateway"
 
-  name            = local.app_name
-  target_base_url = "http://${module.ecs_service.alb_dns_name}"
-  allowed_origins = local.api_allowed_origins
+  name                   = local.app_name
+  vpc_id                 = module.network.vpc_id
+  vpc_link_subnet_ids    = module.network.private_subnet_ids
+  target_listener_arn    = module.ecs_service.alb_listener_arn
+  allowed_origins        = local.api_allowed_origins
+  throttling_rate_limit  = 2000
+  throttling_burst_limit = 4000
 }
 
 module "waf" {
   source = "../../modules/waf"
 
-  name         = local.app_name
-  resource_arn = module.ecs_service.alb_arn
+  name                 = local.app_name
+  resource_arn         = module.ecs_service.alb_arn
+  enable_ip_rate_limit = false
 }
 
 # Dev also gets OIDC roles so GitHub Actions can run against the dev account
